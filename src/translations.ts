@@ -113,6 +113,10 @@ export const translations = {
     enterActionBtn: "Войти",
     continueBtn: "Продолжить",
     exitBtn: "Выйти",
+    connectedServerTitle: "Статус Подключения",
+    connectedServerLabel: "Активный узел: {server}",
+    serverLocationLabel: "Размещение: {location}",
+    pingLabel: "Задержка сети: {ping}мс",
 
     // Avatar Shop / Atelier
     avatarAtelierTitle: "Ателье аватаров",
@@ -272,6 +276,10 @@ export const translations = {
     enterActionBtn: "Join",
     continueBtn: "Continue",
     exitBtn: "Exit",
+    connectedServerTitle: "Connection Status",
+    connectedServerLabel: "Active Node: {server}",
+    serverLocationLabel: "Location: {location}",
+    pingLabel: "Network Latency: {ping}ms",
 
     // Avatar Shop / Atelier
     avatarAtelierTitle: "Avatar Atelier",

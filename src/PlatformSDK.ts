@@ -489,6 +489,46 @@ class PlatformSDK {
       }, 2000);
     }
   }
+
+  /**
+   * Registers a game space / room ID with the CrazyGames SDK so that the native CrazyGames invite button
+   * distributed by the portal can reference the correct room and let friends join in.
+   */
+  public showInviteButton(roomId: string) {
+    if (this.platform === "crazygames" && this.crazygamesSdk?.game) {
+      try {
+        const params = { roomId: roomId, room: roomId };
+        if (typeof this.crazygamesSdk.game.showInviteButton === "function") {
+          console.log(`[PlatformSDK] Calling crazygamesSdk.game.showInviteButton:`, params);
+          this.crazygamesSdk.game.showInviteButton(params);
+        } else if (typeof this.crazygamesSdk.game.inviteButton === "function") {
+          console.log(`[PlatformSDK] Calling crazygamesSdk.game.inviteButton:`, params);
+          this.crazygamesSdk.game.inviteButton(params);
+        } else if (typeof this.crazygamesSdk.game.inviteLink === "function") {
+          console.log(`[PlatformSDK] Registering room with inviteLink parameter:`, params);
+          this.crazygamesSdk.game.inviteLink(params);
+        }
+      } catch (err) {
+        console.error("[PlatformSDK] Error invoking CrazyGames invite integration:", err);
+      }
+    }
+  }
+
+  /**
+   * Hides the native CrazyGames invite button / cleans up registration when leaving the room.
+   */
+  public hideInviteButton() {
+    if (this.platform === "crazygames" && this.crazygamesSdk?.game) {
+      try {
+        if (typeof this.crazygamesSdk.game.hideInviteButton === "function") {
+          console.log("[PlatformSDK] Calling crazygamesSdk.game.hideInviteButton");
+          this.crazygamesSdk.game.hideInviteButton();
+        }
+      } catch (err) {
+        console.error("[PlatformSDK] Error hiding CrazyGames invite button:", err);
+      }
+    }
+  }
 }
 
 export const platformSdk = new PlatformSDK();

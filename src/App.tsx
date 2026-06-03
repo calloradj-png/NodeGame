@@ -161,7 +161,7 @@ const SwipeToReset = ({ language, onStartReset }: { language: string; onStartRes
       const clientX = 'touches' in e ? e.touches[0].clientX : (e as MouseEvent).clientX;
       
       const deltaX = clientX - startXRef.current;
-      const maxTravel = rect.width - 44; // 100% width minus (4px left padding + 36px handle width + 4px right padding)
+      const maxTravel = rect.width - 42; // 100% width minus (3px left padding + 36px handle width + 3px right padding)
       
       if (maxTravel <= 0) return;
 
@@ -221,7 +221,7 @@ const SwipeToReset = ({ language, onStartReset }: { language: string; onStartRes
       {/* Background Fill */}
       <div 
         className="absolute left-0 top-0 bottom-0 bg-red-600/35 pointer-events-none rounded-full"
-        style={{ width: `calc(4px + (100% - 44px) * (${swipeProgress} / 100) + 36px)` }}
+        style={{ width: `calc(3px + (100% - 42px) * (${swipeProgress} / 100) + 36px + (${swipeProgress} / 100 * 3px))` }}
       />
 
       <span className="w-full text-[9px] font-bold uppercase text-red-400/70 tracking-wider text-center pointer-events-none z-10 select-none px-12">
@@ -234,8 +234,8 @@ const SwipeToReset = ({ language, onStartReset }: { language: string; onStartRes
         onTouchStart={handleStart}
         className="absolute w-9 h-9 bg-red-600 hover:bg-red-500 rounded-full flex items-center justify-center text-white shadow-lg select-none z-20 transition-colors"
         style={{ 
-          left: `calc(4px + (100% - 44px) * (${swipeProgress} / 100))`,
-          top: '4px',
+          left: `calc(3px + (100% - 42px) * (${swipeProgress} / 100))`,
+          top: '3px',
           cursor: isSwiping ? 'grabbing' : 'grab'
         }}
       >
@@ -361,7 +361,15 @@ export default function App() {
   // Private server states
   const [isCreatePrivateModalOpen, setIsCreatePrivateModalOpen] = useState(false);
   const [newPrivateServerName, setNewPrivateServerName] = useState("");
-  const [privacyMode, setPrivacyMode] = useState<"only_me" | "friends" | "all">("all");
+  const [privacyMode, setPrivacyMode] = useState<"only_me" | "friends" | "all">("friends");
+  const [isServerInputFocused, setIsServerInputFocused] = useState(false);
+
+  useEffect(() => {
+    if (!isCreatePrivateModalOpen) {
+      setIsServerInputFocused(false);
+      setPrivacyMode("friends");
+    }
+  }, [isCreatePrivateModalOpen]);
 
   // Join block verification states
   const [isJoinErrorModalOpen, setIsJoinErrorModalOpen] = useState(false);
@@ -906,6 +914,103 @@ export default function App() {
   // Visual text overlay state for link copy success toast
   const [inviteSuccess, setInviteSuccess] = useState(false);
 
+  // Common resolver to retrieve active backend URL
+  const getBackendUrl = (): string => {
+    const host = window.location.host;
+    // If running under Google AI Studio (ais-dev or ais-pre subdomains or general Run.app)
+    // always connect directly to the custom same-origin Express backend of this applet
+    if (host.includes("ais-dev") || host.includes("ais-pre") || host.includes("run.app") || host.includes("localhost") || host.includes("127.0.0.1")) {
+      return "";
+    }
+    return (import.meta as any).env.VITE_BACKEND_URL ? (import.meta as any).env.VITE_BACKEND_URL.replace(/\/$/, "") : "";
+  };
+
+  const [currentPing, setCurrentPing] = useState<number | null>(null);
+
+  // Periodic actual network check to retrieve real ping-time delay to active host
+  useEffect(() => {
+    let active = true;
+    let timer: any;
+
+    const pingCheck = async () => {
+      // Find configured VITE_BACKEND_URL or current same-origin endpoint
+      const backendUrl = getBackendUrl();
+      const pingEndpoint = backendUrl ? `${backendUrl}/api/status` : "/api/status";
+      
+      const tStart = performance.now();
+      try {
+        const response = await fetch(pingEndpoint, { method: "HEAD", cache: "no-store" }).catch(() => {
+          return fetch(pingEndpoint, { cache: "no-store" });
+        });
+        
+        if (response.ok && active) {
+          const tEnd = performance.now();
+          setCurrentPing(Math.round(tEnd - tStart));
+        } else if (active) {
+          setCurrentPing(null);
+        }
+      } catch (err) {
+        if (active) {
+          // Fallback root fetch check in case api/status lacks CORS headers or fails
+          try {
+            await fetch(backendUrl || "/", { cache: "no-store" });
+            if (active) {
+              setCurrentPing(Math.round(performance.now() - tStart));
+            }
+          } catch (_) {
+            setCurrentPing(null);
+          }
+        }
+      }
+    };
+
+    pingCheck();
+    timer = setInterval(pingCheck, 4000);
+
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, []);
+
+  const getActiveServerInfo = (lang: string) => {
+    const backendUrl = getBackendUrl();
+    let host = "";
+    if (backendUrl) {
+      try {
+        const urlParsed = new URL(backendUrl);
+        host = urlParsed.host;
+      } catch (_) {
+        host = backendUrl;
+      }
+    } else {
+      host = window.location.host;
+    }
+
+    let serverName = "Google AI Studio";
+    let location = lang === "ru" ? "Западная Европа (Google Cloud)" : "Europe West (Google Cloud)";
+    
+    if (host.includes("localhost") || host.includes("127.0.0.1") || host.includes("0.0.0.0") || host.startsWith("192.168.") || host.startsWith("10.")) {
+      serverName = lang === "ru" ? "Локальный тест (Localhost)" : "Local Test";
+      location = lang === "ru" ? "Ваш компьютер (localhost)" : "Local machine (localhost)";
+    } else if (host.includes("render.com") || host.includes("onrender.com")) {
+      serverName = "Render Server";
+      location = lang === "ru" ? "Франкфурт, Германия (Render)" : "Frankfurt, Germany (Render)";
+    } else if (host.includes("run.app") || host.includes("ais-dev") || host.includes("ais-pre")) {
+      serverName = "Google AI Studio (Cloud Run)";
+      if (host.includes("europe-west1")) {
+        location = lang === "ru" ? "Западная Европа (europe-west1)" : "Europe West1 (Google Cloud)";
+      } else {
+        location = lang === "ru" ? "Google Cloud Platform" : "Google Cloud Platform";
+      }
+    } else {
+      serverName = host;
+      location = lang === "ru" ? "Удаленный узел" : "Remote Host";
+    }
+
+    return { name: serverName, location, host };
+  };
+
   const handleGraphicsChange = (val: number) => {
     setGraphicsQuality(val);
     localStorage.setItem("graphicsQuality", val.toString());
@@ -1022,7 +1127,7 @@ export default function App() {
   useEffect(() => {
     const fetchStatus = async () => {
       try {
-        const backendUrl = (import.meta as any).env.VITE_BACKEND_URL ? (import.meta as any).env.VITE_BACKEND_URL.replace(/\/$/, "") : "";
+        const backendUrl = getBackendUrl();
         const response = await fetch(backendUrl ? `${backendUrl}/api/status` : "/api/status");
         if (response.ok) {
           const data = await response.json();
@@ -1067,7 +1172,7 @@ export default function App() {
     setErrorMsg(null);
 
     // Use configured VITE_BACKEND_URL for separation, or default to current origin
-    const backendUrl = (import.meta as any).env.VITE_BACKEND_URL ? (import.meta as any).env.VITE_BACKEND_URL.replace(/\/$/, "") : "";
+    const backendUrl = getBackendUrl();
     let wsUrl = "";
     if (backendUrl) {
       // Convert https/http to wss/ws
@@ -1576,6 +1681,19 @@ export default function App() {
     };
   }, []);
 
+  // Synchronize room ID changes to CrazyGames SDK if compiled as part of CrazyGames platform
+  useEffect(() => {
+    if (currentRoomId) {
+      if (typeof platformSdk.showInviteButton === "function") {
+        platformSdk.showInviteButton(currentRoomId);
+      }
+    } else {
+      if (typeof platformSdk.hideInviteButton === "function") {
+        platformSdk.hideInviteButton();
+      }
+    }
+  }, [currentRoomId]);
+
   useEffect(() => {
     let timer: any;
     if (connecting) {
@@ -1763,7 +1881,7 @@ export default function App() {
         });
       }
 
-      const backendUrl = (import.meta as any).env.VITE_BACKEND_URL ? (import.meta as any).env.VITE_BACKEND_URL.replace(/\/$/, "") : "";
+      const backendUrl = getBackendUrl();
       const res = await fetch(backendUrl ? `${backendUrl}/api/purge-cache` : "/api/purge-cache", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2475,14 +2593,16 @@ export default function App() {
                                     Kick All
                                   </button>
                                 )}
-                                <button
-                                  type="button"
-                                  onClick={handleCopyInviteLink}
-                                  className="px-3.5 py-1.5 bg-white/10 hover:bg-white/20 active:scale-95 transition text-[11px] font-bold squircle-btn uppercase tracking-wide flex items-center gap-1.5 cursor-pointer border-0 text-teal-300 hover:text-white"
-                                >
-                                  <UserPlus className="w-3.5 h-3.5" />
-                                  {t.copyInviteBtn}
-                                </button>
+                                {platformSdk.getPlatform() !== "crazygames" && (
+                                  <button
+                                    type="button"
+                                    onClick={handleCopyInviteLink}
+                                    className="px-3.5 py-1.5 bg-white/10 hover:bg-white/20 active:scale-95 transition text-[11px] font-bold squircle-btn uppercase tracking-wide flex items-center gap-1.5 cursor-pointer border-0 text-teal-300 hover:text-white"
+                                  >
+                                    <UserPlus className="w-3.5 h-3.5" />
+                                    {t.copyInviteBtn}
+                                  </button>
+                                )}
                               </div>
                             </div>
 
@@ -2613,7 +2733,7 @@ export default function App() {
                                   <button
                                     type="button"
                                     onClick={() => setResetConfirm(false)}
-                                    className="w-full py-2 bg-white/10 hover:bg-white/20 text-white font-extrabold uppercase text-[10.5px] rounded-xl cursor-pointer transition active:scale-95 text-center border-0"
+                                    className="w-full py-2 bg-white/10 hover:bg-white/20 text-white font-extrabold uppercase text-[10.5px] squircle-btn cursor-pointer transition active:scale-95 text-center border-0"
                                   >
                                     {language === "ru" ? "Отмена" : "Cancel"}
                                   </button>
@@ -2622,7 +2742,7 @@ export default function App() {
                                 <button
                                   type="button"
                                   onClick={() => setResetConfirm(true)}
-                                  className="w-full py-2.5 bg-red-600/30 hover:bg-red-600 text-white font-extrabold uppercase text-[10.5px] rounded-xl cursor-pointer transition active:scale-95 text-center border-0"
+                                  className="w-full py-2.5 bg-red-600/30 hover:bg-red-600 text-white font-extrabold uppercase text-[10.5px] squircle-btn cursor-pointer transition active:scale-95 text-center border-0"
                                 >
                                   {language === "ru" ? "Сбросить аккаунт" : "Reset Account"}
                                 </button>
@@ -2632,10 +2752,23 @@ export default function App() {
                         </>
                       ) : (
                         /* Servers (Separate Section Page) tab */
-                        <div className="flex flex-col gap-5">
-                          <div className="flex flex-col">
+                        <div className="flex flex-col gap-4">
+                          <div className="flex flex-col gap-0.5">
                             <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest font-mono">{t.availableRooms}</span>
-                            <span className="text-[11px] text-zinc-400 mt-1">{t.serversSubtitleDesc}</span>
+                            {(() => {
+                              const info = getActiveServerInfo(language);
+                              const pingStr = currentPing !== null ? ` (${currentPing}ms)` : "";
+                              const pingStrRu = currentPing !== null ? ` (${currentPing}мс)` : "";
+                              const displayPing = language === "ru" ? pingStrRu : pingStr;
+                              return (
+                                <span className="text-[11px] text-zinc-500 mt-1 font-sans tracking-wide">
+                                  {language === "ru" 
+                                    ? `Подключено: ${info.name}${displayPing} • ${info.location}`
+                                    : `Connected: ${info.name}${displayPing} • ${info.location}`
+                                  }
+                                </span>
+                              );
+                            })()}
                           </div>
 
                           {/* Create Private Server & Administrative Shutdown Buttons */}
@@ -2835,7 +2968,7 @@ export default function App() {
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 font-sans pointer-events-auto"
+                className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 font-sans pointer-events-auto overflow-y-auto"
               >
                 <div
                   className="pointer-events-auto transition-all duration-[400ms] w-full max-w-sm flex items-center justify-center"
@@ -2843,12 +2976,13 @@ export default function App() {
                 >
                   <motion.div
                     initial={{ scale: 0.95, y: 15 }}
-                    animate={{ scale: 1, y: 0 }}
+                    animate={{ scale: 1, y: isServerInputFocused && isMobile ? -10 : 0 }}
                     exit={{ scale: 0.95, y: 15 }}
-                    className="bg-zinc-950 squircle-panel-lg border-0 p-8 w-full shadow-2xl flex flex-col gap-5 text-white"
+                    transition={{ type: "spring", damping: 25, stiffness: 280 }}
+                    className="bg-zinc-950 squircle-panel-lg border-0 p-6 md:p-8 w-full shadow-2xl flex flex-col gap-4 md:gap-5 text-white"
                   >
                     <div className="flex flex-col gap-1.5 text-left">
-                      <h3 className="text-sm font-black uppercase tracking-wider text-white">
+                       <h3 className="text-sm font-black uppercase tracking-wider text-white">
                         {t.createPrivateRoomAction}
                       </h3>
                       <span className="text-zinc-400 text-xs">
@@ -2866,6 +3000,8 @@ export default function App() {
                           placeholder={t.newServerName}
                           value={newPrivateServerName}
                           onChange={(e) => setNewPrivateServerName(e.target.value.substring(0, 24))}
+                          onFocus={() => setIsServerInputFocused(true)}
+                          onBlur={() => setIsServerInputFocused(false)}
                           className="bg-white/5 px-4 py-2.5 text-xs text-white squircle-btn border-0 outline-none focus:bg-white/10 transition"
                           autoFocus
                         />
@@ -2931,7 +3067,7 @@ export default function App() {
                         onClick={() => {
                           setIsCreatePrivateModalOpen(false);
                           setNewPrivateServerName("");
-                          setPrivacyMode("all");
+                          setPrivacyMode("friends");
                         }}
                         className="flex-1 py-2.5 bg-white/5 hover:bg-white/10 text-zinc-300 squircle-btn border-0 text-xs font-bold uppercase tracking-wider transition cursor-pointer"
                       >
