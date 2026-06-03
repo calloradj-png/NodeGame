@@ -1,0 +1,240 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Fredoka", "Rubik", "Montserrat", "Nunito", ui-sans-serif, system-ui, sans-serif;
+}
+
+html, body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+html.lang-ru {
+  --font-sans: "Rubik", "Montserrat", "Nunito", ui-sans-serif, system-ui, sans-serif !important;
+}
+
+html.lang-ru, .lang-ru, .lang-ru button, .lang-ru input, .lang-ru textarea {
+  font-family: "Rubik", "Montserrat", "Nunito", ui-sans-serif, system-ui, sans-serif !important;
+}
+
+/* Enforce extra-bold weights for Cyrillic / Russian interface */
+html.lang-ru .font-black, .lang-ru .font-black {
+  font-weight: 950 !important;
+}
+html.lang-ru .font-extrabold, .lang-ru .font-extrabold {
+  font-weight: 900 !important;
+}
+html.lang-ru .font-bold, .lang-ru .font-bold {
+  font-weight: 850 !important;
+}
+html.lang-ru .font-semibold, .lang-ru .font-semibold {
+  font-weight: 800 !important;
+}
+html.lang-ru .font-medium, .lang-ru .font-medium {
+  font-weight: 750 !important;
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  -khtml-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+}
+
+/* Ensure inputs and editable spaces are selectable */
+input, textarea, [contenteditable="true"] {
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  -ms-user-select: text;
+  user-select: text;
+}
+
+/* Prevent image dragging and highlight selection globally */
+img {
+  -webkit-user-drag: none;
+  -khtml-user-drag: none;
+  -moz-user-drag: none;
+  -o-user-drag: none;
+  user-drag: none;
+  user-select: none;
+}
+
+.squircle-box {
+  width: 200px;
+  height: 200px;
+  border-radius: 48px;
+  corner-shape: squircle; /* Сглаженное скругление */
+}
+
+.squircle-panel {
+  border-radius: 20px;
+  corner-shape: squircle;
+}
+
+.squircle-panel-lg {
+  border-radius: 48px;
+  corner-shape: squircle;
+}
+
+.squircle-card {
+  border-radius: 16px;
+  corner-shape: squircle;
+}
+
+.squircle-btn {
+  border-radius: 12px;
+  corner-shape: squircle;
+}
+
+/* Rounded buttons matching theme */
+.rounded-btn {
+  border-radius: 9999px;
+}
+
+/* Add custom animations or scrollbar styling for a minimalist design */
+::-webkit-scrollbar {
+  width: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* Custom username animation styles */
+@keyframes rainbow-text {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.animate-rainbow-gradient {
+  background-size: 200% auto;
+  animation: rainbow-text 3s linear infinite;
+}
+
+@keyframes glitch-text {
+  0%, 100% { transform: translate(0); text-shadow: none; }
+  20% { transform: translate(-1px, 0.5px); text-shadow: -1px -0.5px #ff00ff, 1px 0.5px #00f0ff; }
+  40% { transform: translate(-0.5px, -0.5px); text-shadow: 0.5px -0.5px #ff00ff, -0.5px 0.5px #00f0ff; }
+  60% { transform: translate(0.5px, 0.5px); text-shadow: -0.5px 0.5px #ff00ff, 0.5px -0.5px #00f0ff; }
+  80% { transform: translate(0.5px, -0.5px); text-shadow: 0.5px 0.5px #ff00ff, -0.5px -0.5px #00f0ff; }
+}
+
+.animate-glitch-active {
+  animation: glitch-text 2.2s steps(2, start) infinite;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 10px rgba(234, 179, 8, 0.3); border-color: rgba(234, 179, 8, 0.3); }
+  50% { box-shadow: 0 0 18px rgba(234, 179, 8, 0.6); border-color: rgba(234, 179, 8, 0.6); }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+.text-outline {
+  text-shadow: 
+    -1px -1px 0 #000,  
+     1px -1px 0 #000,
+    -1px  1px 0 #000,
+     1px  1px 0 #000,
+     0px  1.5px 2px rgba(0,0,0,0.95);
+}
+
+.text-glow-active {
+  color: #fbbf24 !important;
+  text-shadow: 
+    0 0 4px #fbbf24,
+    -1px -1px 0 #000,  
+     1px -1px 0 #000,
+    -1px  1px 0 #000,
+     1px  1px 0 #000;
+}
+
+/* Avatar Frame Decorations */
+@keyframes rotating-gradient {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes candy-cane-slide {
+  0% { background-position: 0 0; }
+  100% { background-position: 12.73px 0; }
+}
+
+.decor-frame-rainbow {
+  position: absolute;
+  inset: -2px;
+  border-radius: 9999px;
+  padding: 1.5px;
+  background: linear-gradient(to right, red, orange, yellow, green, blue, purple, red);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  animation: rotating-gradient 4s linear infinite;
+  pointer-events: none;
+}
+
+.decor-frame-cyber {
+  position: absolute;
+  inset: -1.5px;
+  border-radius: 9999px;
+  border: 1.5px solid #00f0ff;
+  box-shadow: 0 0 4px #00f0ff, inset 0 0 2px #00f0ff;
+  animation: pulse-glow 2.5s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.decor-frame-golden {
+  position: absolute;
+  inset: -1.5px;
+  border-radius: 9999px;
+  border: 1.5px solid #fbbf24;
+  box-shadow: 0 0 6px rgba(251, 191, 36, 0.8), inset 0 0 2px rgba(251, 191, 36, 0.5);
+  pointer-events: none;
+}
+
+.decor-crown-badge {
+  position: absolute;
+  top: -8.5px;
+  left: 50%;
+  transform: translateX(-50%) rotate(-4deg);
+  font-size: 9.5px;
+  filter: drop-shadow(0px 1px 2px rgba(0,0,0,0.85));
+  pointer-events: none;
+  z-index: 20;
+}
+
+/* Sliding grey candy cane gradient (dark background style) */
+@keyframes candy-cane-crawl {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: 56.57px 0;
+  }
+}
+
+.bg-candy-cane-dark {
+  background-image: repeating-linear-gradient(
+    45deg,
+    #000000,
+    #000000 20px,
+    #0c0c0c 20px,
+    #0c0c0c 40px
+  );
+  background-size: 56.57px 56.57px;
+  animation: candy-cane-crawl 6s linear infinite;
+}
+

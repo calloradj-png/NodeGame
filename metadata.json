@@ -1,0 +1,6 @@
+{
+  "name": "3D Multiplayer Arena",
+  "description": "Real-time 3D multiplayer arena game using Three.js and WebSockets. Control a physics-based player inside a dark checkered grid with beautiful lighting, collect energy orbs, and compete on the leaderboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
