@@ -17,6 +17,7 @@ interface ChatBoxProps {
   selfNameEffect?: string;
   selfColor?: string;
   selfName?: string;
+  selfAvatarUrl?: string;
   language?: Language;
   onToggleTranslation?: (msgId: string) => void;
   onSendBilingualGlobal?: (textRu: string, textEn: string) => void;
@@ -32,6 +33,7 @@ export default function ChatBox({
   selfNameEffect,
   selfColor,
   selfName,
+  selfAvatarUrl,
   language = "ru",
   onToggleTranslation,
   onSendBilingualGlobal
@@ -154,7 +156,7 @@ export default function ChatBox({
 
   return (
     <div 
-      className={`flex flex-col bg-black/80 backdrop-blur-md overflow-hidden pointer-events-auto text-white shadow-2xl border border-white/5 relative ${
+      className={`flex flex-col bg-neutral-950/92 backdrop-blur-md overflow-hidden pointer-events-auto text-white shadow-2xl border border-white/5 relative ${
         className.includes("rounded-b-none") 
           ? "rounded-t-[28px] md:squircle-panel rounded-b-none" 
           : "squircle-panel"
@@ -198,6 +200,7 @@ export default function ChatBox({
                   selfNameEffect={selfNameEffect}
                   selfColor={selfColor}
                   selfName={selfName}
+                  selfAvatarUrl={selfAvatarUrl}
                   language={language}
                   onToggleTranslation={onToggleTranslation}
                 />
@@ -209,14 +212,14 @@ export default function ChatBox({
 
       {/* Reply Preview Action Bar - Made significantly more transparent */}
       {replyingTo && (
-        <div className="px-3.5 py-2 md:px-3 md:py-1.5 bg-neutral-950/20 backdrop-blur-sm border-t border-white/5 flex items-center justify-between gap-1.5 text-xs shrink-0">
-          <div className="flex items-center gap-1 truncate border-l-2 pl-2" style={{ borderColor: replyingTo.playerColor || "#ffffff" }}>
-            <Reply className="w-3.5 h-3.5 md:w-3 md:h-3 text-neutral-400 shrink-0" />
+        <div className="px-4 py-3 md:px-3 md:py-1.5 bg-neutral-950/20 backdrop-blur-sm border-t border-white/5 flex items-center justify-between gap-2 text-xs shrink-0">
+          <div className="flex items-center gap-1.5 truncate border-l-2 pl-2" style={{ borderColor: replyingTo.playerColor || "#ffffff" }}>
+            <Reply className="w-4 h-4 md:w-3 text-neutral-400 shrink-0" />
             <div className="truncate flex flex-col text-left">
-              <span className="font-bold text-[11px] md:text-[9.5px]" style={{ color: replyingTo.playerColor }}>
+              <span className="font-bold text-[12px] md:text-[9.5px]" style={{ color: replyingTo.playerColor }}>
                 {t.replyTo.replace("{name}", replyingTo.playerName)}
               </span>
-              <span className="text-zinc-400 truncate text-[10.5px] md:text-[9px] max-w-[200px]">
+              <span className="text-zinc-400 truncate text-[11px] md:text-[9px] max-w-[200px]">
                 {replyingTo.text}
               </span>
             </div>
@@ -224,20 +227,32 @@ export default function ChatBox({
           <button
             type="button"
             onClick={() => setReplyingTo(null)}
-            className="p-0.5 rounded-full hover:bg-white/10 text-zinc-400 hover:text-white transition cursor-pointer shrink-0"
+            className="w-10 h-10 md:w-6 md:h-6 rounded-full hover:bg-white/10 text-zinc-400 hover:text-white transition cursor-pointer shrink-0 flex items-center justify-center"
           >
-            <X className="w-4 h-4 md:w-3.5 md:h-3.5" />
+            <X className="w-5 h-5 md:w-3.5 md:h-3.5" />
           </button>
         </div>
       )}
 
       {/* Input Form */}
-      <form onSubmit={handleSubmit} className="p-2.5 md:p-2 bg-black/40 flex gap-2 items-center border-t border-white/5 z-10 shrink-0">
+      <form onSubmit={handleSubmit} className="p-3.5 md:p-2 bg-black/40 flex gap-2.5 md:gap-2 items-center border-t border-white/5 z-10 shrink-0">
         <input
           type="text"
           value={text}
           onChange={(e) => setText(e.target.value)}
           disabled={cooldownRemaining > 0}
+          onFocus={() => {
+            setTimeout(() => {
+              window.scrollTo(0, 0);
+              document.body.scrollTop = 0;
+            }, 80);
+          }}
+          onBlur={() => {
+            setTimeout(() => {
+              window.scrollTo(0, 0);
+              document.body.scrollTop = 0;
+            }, 80);
+          }}
           placeholder={
             cooldownRemaining > 0 
               ? t.antiSpamPlaceholder.replace("{time}", cooldownRemaining.toFixed(1))
@@ -246,7 +261,7 @@ export default function ChatBox({
                 : t.messagePlaceholder
           }
           maxLength={100}
-          className={`flex-1 bg-white/5 px-3.5 py-2 md:px-3 md:py-1.5 text-[15px] md:text-xs text-white rounded-xl outline-none placeholder-neutral-600 focus:bg-white/10 transition-all font-sans ${
+          className={`flex-1 bg-white/5 px-4.5 py-3 md:px-3 md:py-1.5 text-[17px] md:text-xs text-white rounded-xl outline-none placeholder-neutral-600 focus:bg-white/10 transition-all font-sans ${
             cooldownRemaining > 0 
               ? "border border-amber-500/40 bg-amber-500/5 text-amber-200/80 cursor-not-allowed placeholder-amber-500/50" 
               : ""
@@ -256,23 +271,23 @@ export default function ChatBox({
           <button
             type="button"
             onClick={() => setShowAdminBilingualOverlay(true)}
-            className="w-8.5 h-8.5 md:w-7 md:h-7 rounded-full bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center transition-all flex-shrink-0 cursor-pointer hover:scale-105 active:scale-95"
+            className="w-[44px] h-[44px] md:w-7 md:h-7 rounded-full bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center transition-all flex-shrink-0 cursor-pointer hover:scale-105 active:scale-95"
             title={language === "ru" ? "Глобальное объявление" : "Global Announcement"}
             id="admin-global-btn"
           >
-            <Megaphone className="w-4.5 h-4.5 md:w-3.5 md:h-3.5 stroke-[2]" />
+            <Megaphone className="w-5.5 h-5.5 md:w-3.5 md:h-3.5 stroke-[2]" />
           </button>
         )}
         <button
           type="submit"
-          className={`w-8.5 h-8.5 md:w-7 md:h-7 rounded-full flex items-center justify-center transition-all flex-shrink-0 cursor-pointer ${
+          className={`w-[44px] h-[44px] md:w-7 md:h-7 rounded-full flex items-center justify-center transition-all flex-shrink-0 cursor-pointer ${
             hasText && cooldownRemaining <= 0
               ? "bg-white text-black hover:bg-neutral-200 active:scale-90"
               : "bg-white/10 text-neutral-500 cursor-not-allowed"
           }`}
           disabled={!hasText || cooldownRemaining > 0}
         >
-          <ArrowUp className="w-4.5 h-4.5 md:w-3.5 md:h-3.5 stroke-[2.5]" />
+          <ArrowUp className="w-5.5 h-5.5 md:w-3.5 md:h-3.5 stroke-[2.5]" />
         </button>
       </form>
  
@@ -409,6 +424,7 @@ interface MessageItemProps {
   selfNameEffect?: string;
   selfColor?: string;
   selfName?: string;
+  selfAvatarUrl?: string;
   language?: Language;
   onToggleTranslation?: (msgId: string) => void;
 }
@@ -427,6 +443,7 @@ function MessageItem({
   selfNameEffect,
   selfColor,
   selfName,
+  selfAvatarUrl,
   language = "ru",
   onToggleTranslation
 }: MessageItemProps) {
@@ -436,6 +453,7 @@ function MessageItem({
   const nameEffect = isSelf ? (selfNameEffect || activePlayer?.nameEffect || msg.playerNameEffect) : (activePlayer?.nameEffect || msg.playerNameEffect);
   const playerColor = isSelf ? (selfColor || activePlayer?.color || msg.playerColor) : (activePlayer?.color || msg.playerColor);
   const playerName = isSelf ? (selfName || activePlayer?.name || msg.playerName) : (activePlayer?.name || msg.playerName);
+  const avatarUrl = isSelf ? (selfAvatarUrl || activePlayer?.avatarUrl || msg.playerAvatarUrl) : (activePlayer?.avatarUrl || msg.playerAvatarUrl);
   const isAdmin = activePlayer ? activePlayer.isAdmin : msg.playerIsAdmin;
 
   const [swipeX, setSwipeX] = useState(0);
@@ -572,10 +590,13 @@ function MessageItem({
         {showAvatar ? (
           <div className="relative shrink-0 flex items-center justify-center p-[4px]">
             <div 
-              className="w-7 h-7 md:w-[22px] md:h-[22px] rounded-full flex items-center justify-center font-extrabold text-[12px] md:text-[9.5px] text-black select-none shrink-0 uppercase shadow-sm relative animate-fade-in"
-              style={{ backgroundColor: playerColor || "#ffffff" }}
+              className="w-7 h-7 md:w-[22px] md:h-[22px] rounded-full flex items-center justify-center font-extrabold text-[12px] md:text-[9.5px] text-black select-none shrink-0 uppercase shadow-sm relative animate-fade-in bg-cover bg-center"
+              style={{ 
+                backgroundColor: playerColor || "#ffffff",
+                backgroundImage: avatarUrl ? `url(${avatarUrl})` : "none"
+              }}
             >
-              {playerName ? playerName.charAt(0) : "?"}
+              {!avatarUrl && (playerName ? playerName.charAt(0) : "?")}
               <AvatarFrame decorFrame={decorFrame} playerColor={playerColor || "#ffffff"} />
             </div>
           </div>

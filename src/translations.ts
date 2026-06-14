@@ -72,7 +72,7 @@ export const translations = {
     copyInviteBtn: "Пригласить друга",
     addFriendBtn: "Добавить в друзья",
     removeFriendBtn: "Удалить",
-    pendingFriend: "Ожидание подтверждения",
+    pendingFriend: "Ожидание",
     alreadyFriends: "В друзьях",
     incomingFriendRequest: "Запрос в друзья",
     leaveGameBtn: "Выход из игры",
@@ -85,7 +85,6 @@ export const translations = {
     low: "Низкое",
     medium: "Среднее",
     high: "Высокое",
-    ultra: "Ультра",
 
     // Servers Overlay
     availableRooms: "Доступные Серверы",
@@ -235,7 +234,7 @@ export const translations = {
     copyInviteBtn: "Copy Invite Link",
     addFriendBtn: "Add Friend",
     removeFriendBtn: "Remove",
-    pendingFriend: "Pending confirmation",
+    pendingFriend: "Pending",
     alreadyFriends: "Friends",
     incomingFriendRequest: "Friend Request",
     leaveGameBtn: "Leave Game",
@@ -248,7 +247,6 @@ export const translations = {
     low: "Low",
     medium: "Medium",
     high: "High",
-    ultra: "Ultra",
 
     // Servers Overlay
     availableRooms: "Available Servers",

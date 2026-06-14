@@ -78,13 +78,13 @@ export default function DynamicJoystick({ joystickRef, disabled = false }: Dynam
 
   return (
     <>
-      {/* Invisible Touch overlay covering the entire active screen zone at layer z-[5] */}
+      {/* Invisible Touch overlay covering the left half of the screen at layer z-[5] */}
       <div
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUpOrCancel}
         onPointerCancel={handlePointerUpOrCancel}
-        className="fixed inset-0 w-full h-full z-[5] pointer-events-auto touch-none select-none"
+        className="fixed left-0 top-0 w-1/2 h-full z-[5] pointer-events-auto touch-none select-none"
       />
 
       {/* Visual representation of elements positioned absolutely on screen */}

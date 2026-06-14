@@ -9,6 +9,7 @@ import AvatarFrame from "./components/AvatarFrame";
 import VerifiedBadge from "./components/VerifiedBadge";
 import { Player, Collectible, ChatMessage } from "./types";
 import platformSdk from "./PlatformSDK";
+import { decodeServerPlayerMoved } from "./binaryProtocol";
 import {
   Cpu,
   Terminal,
@@ -30,10 +31,15 @@ import {
   Zap,
   Plus,
   Heart,
-  Users
+  Users,
+  ChevronDown,
+  ArrowUp,
+  Maximize,
+  Minimize
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import DynamicJoystick from "./components/DynamicJoystick";
+import CasualCoinsHUD from "./components/CasualCoinsHUD";
 
 // Custom SVG Icons
 // @ts-ignore
@@ -88,11 +94,16 @@ interface RoomStats {
   name: string;
   activePlayers: number;
   hasPassword?: boolean;
+  mode?: string;
+  creatorId?: string;
+  creatorName?: string;
   players?: Array<{
     id: string;
     name: string;
     color: string;
     avatarStyle: number;
+    decorFrame?: string;
+    avatarUrl?: string;
   }>;
 }
 
@@ -245,11 +256,222 @@ const SwipeToReset = ({ language, onStartReset }: { language: string; onStartRes
   );
 };
 
+function FriendRequestToast({ req, onAccept, onDecline, onTimeout, language, t }: {
+  key?: any;
+  req: any;
+  onAccept: (senderId: string) => void;
+  onDecline: (senderId: string) => void;
+  onTimeout: (senderId: string) => void;
+  language: string;
+  t: any;
+}) {
+  const [progress, setProgress] = useState(100);
+  const duration = 5000; // 5 seconds
+  const step = 30; // ms per update
+
+  const onTimeoutRef = useRef(onTimeout);
+  onTimeoutRef.current = onTimeout;
+
+  useEffect(() => {
+    const startTime = Date.now();
+    const interval = setInterval(() => {
+      const elapsed = Date.now() - startTime;
+      const remaining = Math.max(0, 100 - (elapsed / duration) * 100);
+      setProgress(remaining);
+      if (elapsed >= duration) {
+        clearInterval(interval);
+        onTimeoutRef.current(req.senderId);
+      }
+    }, step);
+    return () => clearInterval(interval);
+  }, [req.senderId]);
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 30, scale: 0.9 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: 15, scale: 0.95 }}
+      transition={{ type: "spring", stiffness: 350, damping: 25 }}
+      className="relative bg-black/55 squircle-card p-4 shadow-2xl flex items-center gap-4 backdrop-blur-xl pointer-events-auto border-0 overflow-hidden"
+    >
+      <div className="relative shrink-0 flex items-center justify-center p-0.5">
+        {req.senderDecorFrame === "crown" && (
+          <span className="decor-crown-badge !text-[8px] !top-[-5px]">👑</span>
+        )}
+        <div 
+          className="w-10 h-10 rounded-full flex items-center justify-center font-black text-sm select-none text-white relative shadow-inner animate-fade-in bg-cover bg-center"
+          style={{ 
+            backgroundColor: req.senderColor,
+            backgroundImage: req.senderAvatarUrl ? `url(${req.senderAvatarUrl})` : "none"
+          }}
+        >
+          {!req.senderAvatarUrl && req.senderName.charAt(0).toUpperCase()}
+          <AvatarFrame decorFrame={req.senderDecorFrame} playerColor={req.senderColor} />
+        </div>
+      </div>
+      <div className="flex flex-col min-w-0 flex-1">
+        <span className="text-[10px] text-indigo-400 font-extrabold uppercase font-mono leading-none tracking-wider select-none">
+          {t.incomingFriendRequest}
+        </span>
+        <span className="text-sm text-white font-bold truncate mt-1 leading-tight">
+          {req.senderName}
+        </span>
+      </div>
+      <div className="flex items-center gap-2 shrink-0 select-none">
+        <button
+          type="button"
+          onClick={() => onAccept(req.senderId)}
+          className="w-9 h-9 rounded-full bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600 hover:text-white flex items-center justify-center cursor-pointer border-0 transition-all active:scale-90"
+          title={language === "ru" ? "Принять" : "Accept"}
+        >
+          <Check className="w-5 h-5 stroke-[3]" />
+        </button>
+        <button
+          type="button"
+          onClick={() => onDecline(req.senderId)}
+          className="w-9 h-9 rounded-full bg-red-600/20 text-red-400 hover:bg-red-600 hover:text-white flex items-center justify-center cursor-pointer border-0 transition-all active:scale-90"
+          title={language === "ru" ? "Отклонить" : "Decline"}
+        >
+          <X className="w-5 h-5 stroke-[3]" />
+        </button>
+      </div>
+
+      {/* Bottom Progress Bar: white, full width, precisely on the bottom edge */}
+      <div className="absolute bottom-0 left-0 right-0 h-1 bg-white/10 overflow-hidden">
+        <div 
+          className="h-full bg-white"
+          style={{ width: `${progress}%` }}
+        />
+      </div>
+    </motion.div>
+  );
+}
+
+const getSquirclePath = (x: number, y: number, w: number, h: number, r: number): string => {
+  const d = Math.min(r * 1.35, w / 2, h / 2);
+  const cp = d * 0.45;
+  return `M ${x + d} ${y} L ${x + w - d} ${y} C ${x + w - cp} ${y}, ${x + w} ${y + cp}, ${x + w} ${y + d} L ${x + w} ${y + h - d} C ${x + w} ${y + h - cp}, ${x + w - cp} ${y + h}, ${x + w - d} ${y + h} L ${x + d} ${y + h} C ${x + cp} ${y + h}, ${x} ${y + h - cp}, ${x} ${y + h - d} L ${x} ${y + d} C ${x} ${y + cp}, ${x + cp} ${y}, ${x + d} ${y} Z`.trim().replace(/\s+/g, " ");
+};
+
 export default function App() {
   const isMobile = window.innerWidth <= 768;
+  const [isMobileDevice, setIsMobileDevice] = useState(false);
+  const [isPortrait, setIsPortrait] = useState(false);
+
+  useEffect(() => {
+    const checkDevice = () => {
+      const ua = navigator.userAgent;
+      const isUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+      const hasTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+      setIsMobileDevice(isUA || (hasTouch && window.innerWidth <= 1024));
+      setIsPortrait(window.innerHeight > window.innerWidth);
+    };
+    checkDevice();
+    window.addEventListener("resize", checkDevice);
+    window.addEventListener("orientationchange", checkDevice);
+
+    const preventViewportScroll = () => {
+      if (window.scrollY !== 0 || window.scrollX !== 0) {
+        window.scrollTo(0, 0);
+      }
+      if (document.body.scrollTop !== 0) {
+        document.body.scrollTop = 0;
+      }
+      if (document.documentElement.scrollTop !== 0) {
+        document.documentElement.scrollTop = 0;
+      }
+    };
+    window.addEventListener("scroll", preventViewportScroll, { passive: true });
+
+    return () => {
+      window.removeEventListener("resize", checkDevice);
+      window.removeEventListener("orientationchange", checkDevice);
+      window.removeEventListener("scroll", preventViewportScroll);
+    };
+  }, []);
+
   const [sdkAvatarUrl, setSdkAvatarUrl] = useState<string | null>(null);
   const [sdkAuthWarning, setSdkAuthWarning] = useState<string | null>(null);
   const [isInitialLoadDone, setIsInitialLoadDone] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const isFS = !!(
+        document.fullscreenElement ||
+        (document as any).webkitFullscreenElement ||
+        (document as any).mozFullScreenElement ||
+        (document as any).msFullscreenElement
+      );
+      setIsFullscreen(isFS);
+    };
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
+    document.addEventListener("mozfullscreenchange", handleFullscreenChange);
+    document.addEventListener("MSFullscreenChange", handleFullscreenChange);
+
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+      document.removeEventListener("webkitfullscreenchange", handleFullscreenChange);
+      document.removeEventListener("mozfullscreenchange", handleFullscreenChange);
+      document.removeEventListener("MSFullscreenChange", handleFullscreenChange);
+    };
+  }, []);
+
+  const toggleFullscreen = () => {
+    const doc = document.documentElement;
+    if (!document.fullscreenElement &&
+        !(document as any).webkitFullscreenElement &&
+        !(document as any).mozFullscreenElement &&
+        !(document as any).msFullscreenElement) {
+      if (doc.requestFullscreen) {
+        doc.requestFullscreen();
+      } else if ((doc as any).webkitRequestFullscreen) {
+        (doc as any).webkitRequestFullscreen();
+      } else if ((doc as any).mozRequestFullScreen) {
+        (doc as any).mozRequestFullScreen();
+      } else if ((doc as any).msRequestFullscreen) {
+        (doc as any).msRequestFullscreen();
+      }
+    } else {
+      if (document.exitFullscreen) {
+        document.exitFullscreen();
+      } else if ((document as any).webkitExitFullscreen) {
+        (document as any).webkitExitFullscreen();
+      } else if ((document as any).mozCancelFullScreen) {
+        (document as any).mozCancelFullScreen();
+      } else if ((document as any).msExitFullscreen) {
+        (document as any).msExitFullscreen();
+      }
+    }
+  };
+
+  // 3D Cover tilt states
+  const coverRef = useRef<HTMLDivElement>(null);
+  const [coverTilt, setCoverTilt] = useState({ x: 0, y: 0 });
+  const [isCoverHovered, setIsCoverHovered] = useState(false);
+  const [isCoverPressed, setIsCoverPressed] = useState(false);
+
+  const handleCoverHoverMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (isMobile || !coverRef.current) return;
+    const rect = coverRef.current.getBoundingClientRect();
+    const width = rect.width;
+    const height = rect.height;
+    const mouseX = (e.clientX - rect.left - width / 2) / (width / 2);
+    const mouseY = (e.clientY - rect.top - height / 2) / (height / 2);
+    
+    setCoverTilt({
+      x: -mouseY * 4, // Max 4 degrees pitch for smoother feeling
+      y: mouseX * 4,  // Max 4 degrees yaw
+    });
+  };
+
+  const handleCoverHoverMouseLeave = () => {
+    setIsCoverHovered(false);
+    setIsCoverPressed(false);
+    setCoverTilt({ x: 0, y: 0 });
+  };
 
   const [language, setLanguage] = useState<Language>(() => {
     const saved = localStorage.getItem("app_lang");
@@ -266,12 +488,14 @@ export default function App() {
     }
   });
   const [sentRequests, setSentRequests] = useState<string[]>([]);
+  const [receivedRequests, setReceivedRequests] = useState<string[]>([]);
   const [incomingRequests, setIncomingRequests] = useState<Array<{
     senderId: string;
     senderName: string;
     senderColor: string;
     senderAvatarStyle: number;
     senderDecorFrame: string;
+    senderAvatarUrl?: string;
   }>>([]);
 
   const friendsRef = useRef(friends);
@@ -288,6 +512,10 @@ export default function App() {
   };
 
   const handleSendFriendRequest = (targetPlayerId: string) => {
+    if (receivedRequests.includes(targetPlayerId)) {
+      handleAcceptFriendRequest(targetPlayerId);
+      return;
+    }
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: "friend_request",
@@ -305,14 +533,32 @@ export default function App() {
       }));
     }
     setIncomingRequests(prev => prev.filter(r => r.senderId !== senderId));
+    setReceivedRequests(prev => prev.filter(id => id !== senderId));
   };
 
   const handleDeclineFriendRequest = (senderId: string) => {
+    setIncomingRequests(prev => prev.filter(r => r.senderId !== senderId));
+    setReceivedRequests(prev => prev.filter(id => id !== senderId));
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: "friend_decline",
+        payload: { senderId }
+      }));
+    }
+  };
+
+  const handleTimeoutFriendRequest = (senderId: string) => {
     setIncomingRequests(prev => prev.filter(r => r.senderId !== senderId));
   };
 
   const handleRemoveFriend = (targetName: string) => {
     setFriends(prev => prev.filter(name => name !== targetName));
+    if (roomInfoRef.current) {
+      const targetPlayerObj = Object.values(roomInfoRef.current.players).find((p: any) => p.name === targetName) as any;
+      if (targetPlayerObj) {
+        setSentRequests(prev => prev.filter(id => id !== targetPlayerObj.id));
+      }
+    }
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: "friend_remove",
@@ -326,6 +572,8 @@ export default function App() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [showOverlayActual, setShowOverlayActual] = useState(true);
+  const [isOverlayFullyGone, setIsOverlayFullyGone] = useState(false);
+  const [overlayBtnRipples, setOverlayBtnRipples] = useState<{ id: number; x: number; y: number; size: number }[]>([]);
 
   // Connection WebSocket
   const wsRef = useRef<WebSocket | null>(null);
@@ -339,6 +587,10 @@ export default function App() {
   }, [playerId]);
   const [currentRoomId, setCurrentRoomId] = useState<string | null>(null);
   const [roomInfo, setRoomInfo] = useState<RoomInfo | null>(null);
+  const roomInfoRef = useRef(roomInfo);
+  useEffect(() => {
+    roomInfoRef.current = roomInfo;
+  }, [roomInfo]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [globalAnnouncement, setGlobalAnnouncement] = useState<{
     id: string;
@@ -393,16 +645,22 @@ export default function App() {
     { name_en: "NODE avatar", name_ru: "NODE аватар", cost: 0, path: "Avatar_node.png", flags: "admin" }
   ]);
 
+  const loadedAvatarsRef = useRef(loadedAvatars);
+  useEffect(() => {
+    loadedAvatarsRef.current = loadedAvatars;
+  }, [loadedAvatars]);
+
   const [loadedFrames, setLoadedFrames] = useState<Array<{ name_en: string; name_ru: string; cost: number; path: string; flags: string }>>(() => [
     { name_en: "Fruits frame", name_ru: "Фруктовая рамка", cost: 100, path: "Frame_1.png", flags: "none" }
   ]);
 
   const [catalogReloadTrigger, setCatalogReloadTrigger] = useState(0);
+  const [avatarsTimestamp, setAvatarsTimestamp] = useState(() => Date.now());
   const [purgingCache, setPurgingCache] = useState(false);
   const [purgeMessage, setPurgeMessage] = useState<{ text: string; isError: boolean } | null>(null);
 
   const getStyleIdOfSkin = (skinId: string) => {
-    const idx = loadedAvatars.findIndex(a => a.path === skinId);
+    const idx = loadedAvatarsRef.current.findIndex(a => a.path === skinId);
     if (idx !== -1) return idx;
     if (skinId === "default" || skinId === "Avatar_1.png") return 0;
     if (skinId === "newavatar" || skinId === "Avatar_2.png") return 1;
@@ -411,12 +669,13 @@ export default function App() {
   };
 
   const isAdmin = !!(playerId && roomInfo?.players[playerId]?.isAdmin);
+  const [showHitboxes, setShowHitboxes] = useState(false);
 
   const isSkinOwnedHelper = (id: string) => {
     if (id === "default" || id === "Avatar_1.png") return true;
-    const found = loadedAvatars.find(s => s.path === id);
+    const found = loadedAvatarsRef.current.find(s => s.path === id);
     if (found) {
-      if (found.cost === 0) return true;
+      if (Number(found.cost) === 0) return true;
       if (found.flags === "admin" && isAdmin) return true;
     }
     return ownedSkins.includes(id);
@@ -424,29 +683,67 @@ export default function App() {
 
   useEffect(() => {
     const fetchCatalog = async () => {
+      const bUrl = getBackendUrl();
+      const timestamp = Date.now();
+
+      // Load Avatars
       try {
-        const avatarsRes = await fetch("https://cdn.jsdelivr.net/gh/calloradj-png/NodeAvatars@main/Avatars.json?t=" + Date.now());
-        if (avatarsRes.ok) {
-          const data = await avatarsRes.json();
-          if (Array.isArray(data)) {
-            setLoadedAvatars(data);
+        let loaded = false;
+        try {
+          const avatarsRes = await fetch(bUrl ? `${bUrl}/api/avatars?t=${timestamp}` : `/api/avatars?t=${timestamp}`);
+          if (avatarsRes.ok) {
+            const data = await avatarsRes.json();
+            if (Array.isArray(data)) {
+              setLoadedAvatars(data);
+              loaded = true;
+            }
+          }
+        } catch (serverErr) {
+          console.warn("Could not load avatars from server, trying CDN fallback:", serverErr);
+        }
+
+        if (!loaded) {
+          const avatarsCdnRes = await fetch(`https://cdn.jsdelivr.net/gh/calloradj-png/NodeAvatars@main/Avatars.json?t=${timestamp}`);
+          if (avatarsCdnRes.ok) {
+            const data = await avatarsCdnRes.json();
+            if (Array.isArray(data)) {
+              setLoadedAvatars(data);
+            }
           }
         }
       } catch (err) {
         console.warn("Error loading Avatars.json:", err);
       }
 
+      // Load Frames
       try {
-        const framesRes = await fetch("https://cdn.jsdelivr.net/gh/calloradj-png/NodeAvatars@main/Frames.json?t=" + Date.now());
-        if (framesRes.ok) {
-          const data = await framesRes.json();
-          if (Array.isArray(data)) {
-            setLoadedFrames(data);
+        let loaded = false;
+        try {
+          const framesRes = await fetch(bUrl ? `${bUrl}/api/frames?t=${timestamp}` : `/api/frames?t=${timestamp}`);
+          if (framesRes.ok) {
+            const data = await framesRes.json();
+            if (Array.isArray(data)) {
+              setLoadedFrames(data);
+              loaded = true;
+            }
+          }
+        } catch (serverErr) {
+          console.warn("Could not load frames from server, trying CDN fallback:", serverErr);
+        }
+
+        if (!loaded) {
+          const framesCdnRes = await fetch(`https://cdn.jsdelivr.net/gh/calloradj-png/NodeAvatars@main/Frames.json?t=${timestamp}`);
+          if (framesCdnRes.ok) {
+            const data = await framesCdnRes.json();
+            if (Array.isArray(data)) {
+              setLoadedFrames(data);
+            }
           }
         }
       } catch (err) {
         console.warn("Error loading Frames.json:", err);
       }
+      setAvatarsTimestamp(Date.now());
     };
 
     fetchCatalog();
@@ -518,6 +815,25 @@ export default function App() {
     effect: localStorage.getItem("eq_effect") || "none",
     decor: localStorage.getItem("eq_decor") || "none"
   }));
+
+  // Automatically update last saved cosmetics when an owned cosmetic is selected (excluding unowned previews)
+  useEffect(() => {
+    if (isSkinOwnedHelper(equippedSkin)) {
+      setLastSavedCosmetics(prev => ({ ...prev, skin: equippedSkin }));
+    }
+  }, [equippedSkin, ownedSkins, loadedAvatars]);
+
+  useEffect(() => {
+    if (equippedEffect === "none" || ownedEffects.includes(equippedEffect)) {
+      setLastSavedCosmetics(prev => ({ ...prev, effect: equippedEffect }));
+    }
+  }, [equippedEffect, ownedEffects]);
+
+  useEffect(() => {
+    if (equippedDecorFrame === "none" || ownedDecorFrames.includes(equippedDecorFrame)) {
+      setLastSavedCosmetics(prev => ({ ...prev, decor: equippedDecorFrame }));
+    }
+  }, [equippedDecorFrame, ownedDecorFrames]);
 
   // Simulated Advertisement States
   const [isWatchingAd, setIsWatchingAd] = useState(false);
@@ -612,7 +928,7 @@ export default function App() {
         };
       });
     }
-  }, [profName, profColor, equippedSkin, equippedTrail, equippedEffect, equippedDecorFrame, playerId]);
+  }, [profName, profColor, equippedSkin, equippedTrail, equippedEffect, equippedDecorFrame, playerId, loadedAvatars]);
 
   // Instantly update active local chat messages styling when local player cosmetics change to prevent any stale states
   useEffect(() => {
@@ -807,27 +1123,30 @@ export default function App() {
     }
   };
 
+  // Ad video simulation countdown - runs exactly once per ad session to prevent double triggers
   useEffect(() => {
-    let interval: any;
-    if (isWatchingAd && adCountdown > 0) {
-      interval = setInterval(() => {
-        setAdCountdown(prev => {
-          if (prev <= 1) {
-            clearInterval(interval);
-            setCoins(c => c + 25);
-            playCoinChime();
-            const text = language === "ru" ? "Получено +25" : "Received +25";
-            setPurchaseToast({ text, showCoin: true });
-            setTimeout(() => setPurchaseToast(null), 3500);
-            setIsWatchingAd(false);
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    }
+    if (!isWatchingAd) return;
+
+    setAdCountdown(4);
+    
+    const interval = setInterval(() => {
+      setAdCountdown((prev) => {
+        if (prev <= 1) {
+          clearInterval(interval);
+          setCoins((c) => c + 25);
+          playCoinChime();
+          const text = language === "ru" ? "Получено +25" : "Received +25";
+          setPurchaseToast({ text, showCoin: true });
+          setTimeout(() => setPurchaseToast(null), 3500);
+          setIsWatchingAd(false);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
     return () => clearInterval(interval);
-  }, [isWatchingAd, adCountdown]);
+  }, [isWatchingAd]);
 
   // Synchronize cosmetics with other players (prevent broadcasting unowned/previewed shop items)
   useEffect(() => {
@@ -848,11 +1167,12 @@ export default function App() {
           particleTrail: equippedTrail,
           nameEffect: activeEffectForBroadcast,
           decorFrame: activeDecorForBroadcast,
-          avatarStyle: getStyleIdOfSkin(activeSkinForBroadcast)
+          avatarStyle: getStyleIdOfSkin(activeSkinForBroadcast),
+          avatarUrl: sdkAvatarUrl || undefined
         }
       }));
     }
-  }, [equippedTrail, equippedEffect, equippedDecorFrame, equippedSkin, profName, profColor, playerId, ownedSkins, ownedEffects, ownedDecorFrames, lastSavedCosmetics]);
+  }, [equippedTrail, equippedEffect, equippedDecorFrame, equippedSkin, profName, profColor, playerId, ownedSkins, ownedEffects, ownedDecorFrames, lastSavedCosmetics, loadedAvatars, sdkAvatarUrl]);
 
   // Administrative state managers
   const [adminPassword, setAdminPassword] = useState(() => localStorage.getItem("admin_password") || "");
@@ -879,8 +1199,28 @@ export default function App() {
   const [adminReasonText, setAdminReasonText] = useState("");
   const [adminKickedMessage, setAdminKickedMessage] = useState<string | null>(null);
   const [adminShutdownMessage, setAdminShutdownMessage] = useState<string | null>(null);
-  const [isChatVisible, setIsChatVisible] = useState(!isMobile);
-  const [isScoreboardVisible, setIsScoreboardVisible] = useState(!isMobile);
+  const [isChatVisible, setIsChatVisible] = useState(() => {
+    if (typeof navigator !== "undefined") {
+      const ua = navigator.userAgent;
+      const isUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+      const hasTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+      if (isUA || (hasTouch && window.innerWidth <= 1024)) {
+        return false;
+      }
+    }
+    return !isMobile;
+  });
+  const [isScoreboardVisible, setIsScoreboardVisible] = useState(() => {
+    if (typeof navigator !== "undefined") {
+      const ua = navigator.userAgent;
+      const isUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+      const hasTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+      if (isUA || (hasTouch && window.innerWidth <= 1024)) {
+        return false;
+      }
+    }
+    return !isMobile;
+  });
 
   const [unreadCount, setUnreadCount] = useState(0);
   const [miniMessages, setMiniMessages] = useState<ChatMessage[]>([]);
@@ -890,10 +1230,10 @@ export default function App() {
   const [mobileChatHeight, setMobileChatHeight] = useState<number | null>(null);
   const [uiScale, setUiScale] = useState(1);
 
-  // Graphics Level Preset: 1 = Low, 2 = Medium, 3 = High, 4 = Ultra
+  // Graphics Level Preset: 1 = Low, 2 = Medium, 3 = High
   const [graphicsQuality, setGraphicsQuality] = useState<number>(() => {
     const saved = localStorage.getItem("graphicsQuality");
-    return saved ? parseInt(saved, 10) : 3;
+    return saved ? parseInt(saved, 10) : 2;
   });
 
   // Sound Volume Level: 0 - 100
@@ -908,8 +1248,8 @@ export default function App() {
   // Search filter query string for rooms
   const [roomSearch, setRoomSearch] = useState("");
 
-  // Filters state tab: "all" | "available" | "full"
-  const [roomFilter, setRoomFilter] = useState<"all" | "available" | "full">("all");
+  // Filters state tab: "desc" | "asc" | "free"
+  const [roomFilter, setRoomFilter] = useState<"desc" | "asc" | "free">("desc");
 
   // Visual text overlay state for link copy success toast
   const [inviteSuccess, setInviteSuccess] = useState(false);
@@ -1067,29 +1407,38 @@ export default function App() {
 
   // Adaptive UI Proportion Scaling based on minimum viewport width/height relative to base layout
   useEffect(() => {
-    if (isMobile) {
-      setUiScale(1);
-      return;
-    }
     const updateScale = () => {
-      const baseWidth = 1366;
-      const baseHeight = 768;
-      
-      const scaleX = window.innerWidth / baseWidth;
-      const scaleY = window.innerHeight / baseHeight;
-      
-      // Base scaling on viewport, scaled up by 1.3x as requested for perfect game-HUD proportions
-      let scale = Math.min(scaleX, scaleY) * 1.3;
-      
-      // Clamp boundaries shifted up proportionally (min 0.85, max 1.6) to ensure it stays wonderfully readable
-      scale = Math.min(1.6, Math.max(0.85, scale));
-      setUiScale(scale);
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      const isWindowMobile = width <= 768;
+
+      if (isWindowMobile) {
+        // Mobile / Portrait adaptive scaling - beautifully proportioned for phone screens
+        // Calculate the ideal scale where the central card (width 319px) is approximately 0.64 of screen width.
+        const idealScale = (width * 0.64) / 319;
+        // Clamp scale nicely between 0.7 and 0.90 to ensure the overlay is perfectly balanced and readable
+        const scale = Math.min(0.90, Math.max(0.7, idealScale));
+        setUiScale(scale);
+      } else {
+        // Desktop landscape scaling
+        const baseWidth = 1366;
+        const baseHeight = 768;
+        const scaleX = width / baseWidth;
+        const scaleY = height / baseHeight;
+        
+        // Base scaling on viewport, scaled up by 1.3x as requested for perfect game-HUD proportions
+        let scale = Math.min(scaleX, scaleY) * 1.3;
+        
+        // Clamp boundaries shifted up proportionally (min 0.85, max 1.6) to ensure it stays wonderfully readable
+        scale = Math.min(1.6, Math.max(0.85, scale));
+        setUiScale(scale);
+      }
     };
 
     updateScale();
     window.addEventListener("resize", updateScale);
     return () => window.removeEventListener("resize", updateScale);
-  }, [isMobile]);
+  }, []);
 
   useEffect(() => {
     isChatVisibleRef.current = isChatVisible;
@@ -1143,7 +1492,10 @@ export default function App() {
                 name: rName,
                 activePlayers: r.count,
                 players: r.players,
-                hasPassword: r.hasPassword
+                hasPassword: r.hasPassword,
+                mode: r.mode || "all",
+                creatorId: r.creatorId,
+                creatorName: r.creatorName
               };
             });
             setAvailableRooms(list);
@@ -1184,6 +1536,7 @@ export default function App() {
 
     try {
       const socket = new WebSocket(wsUrl);
+      socket.binaryType = "arraybuffer";
       wsRef.current = socket;
 
       socket.onopen = () => {
@@ -1206,15 +1559,67 @@ export default function App() {
               } catch (_) {
                 return [];
               }
-            })()
+            })(),
+            avatarUrl: sdkAvatarUrl || undefined
           }
         }));
       };
 
       socket.onmessage = (event) => {
         try {
+          if (event.data instanceof ArrayBuffer) {
+            const decoded = decodeServerPlayerMoved(event.data);
+            setRoomInfo(prev => {
+              if (!prev) return prev;
+              const target = prev.players[decoded.id];
+              if (!target) return prev;
+              
+              target.x = decoded.x;
+              target.y = decoded.y;
+              target.z = decoded.z;
+              target.rx = decoded.rx;
+              target.ry = decoded.ry;
+              target.rz = decoded.rz;
+              target.isMoving = decoded.isMoving;
+
+              return {
+                ...prev,
+                players: {
+                  ...prev.players,
+                  [decoded.id]: { ...target }
+                }
+              };
+            });
+            return;
+          }
+
           const data = JSON.parse(event.data);
           const { type, payload } = data;
+
+          // Dispatch generic event for place-specific scripts
+          const genericEv = new CustomEvent("ws_event", { detail: { type, payload } });
+          document.dispatchEvent(genericEv);
+
+          if (type === "physics_sync") {
+            const ev = new CustomEvent("physics_sync", { detail: payload.bodies });
+            document.dispatchEvent(ev);
+            return;
+          }
+
+          if (type === "button_state_changed") {
+            setRoomInfo(prev => {
+              if (!prev) return prev;
+              return {
+                ...prev,
+                buttonIsPressed: !!payload.isPressed,
+                buttonPressedUntil: payload.pressedUntil || 0
+              };
+            });
+
+            const ev = new CustomEvent("button_state_changed", { detail: payload });
+            document.dispatchEvent(ev);
+            return;
+          }
 
           if (type === "init") {
             setPlayerId(payload.playerId);
@@ -1232,7 +1637,9 @@ export default function App() {
                 name: rName,
                 activePlayers: r.activePlayers,
                 players: r.players,
-                mode: r.mode
+                mode: r.mode,
+                creatorId: r.creatorId,
+                creatorName: r.creatorName
               };
             }));
             setProfName(payload.roomInfo.players[payload.playerId]?.name || nickname);
@@ -1372,7 +1779,9 @@ export default function App() {
                 name: rName,
                 activePlayers: r.activePlayers,
                 players: r.players,
-                mode: r.mode
+                mode: r.mode,
+                creatorId: r.creatorId,
+                creatorName: r.creatorName
               };
             }));
           }
@@ -1416,11 +1825,20 @@ export default function App() {
           }
 
           else if (type === "friend_request_received") {
-            const { senderId, senderName, senderColor, senderAvatarStyle, senderDecorFrame } = payload;
-            setIncomingRequests(prev => {
-              if (prev.some(r => r.senderId === senderId)) return prev;
-              return [...prev, { senderId, senderName, senderColor, senderAvatarStyle, senderDecorFrame }];
-            });
+            const { senderId, senderName, senderColor, senderAvatarStyle, senderDecorFrame, senderAvatarUrl } = payload;
+            if (sentRequests.includes(senderId)) {
+              // Mutual agreement found! Accept immediately.
+              handleAcceptFriendRequest(senderId);
+            } else {
+              setReceivedRequests(prev => {
+                if (prev.includes(senderId)) return prev;
+                return [...prev, senderId];
+              });
+              setIncomingRequests(prev => {
+                if (prev.some(r => r.senderId === senderId)) return prev;
+                return [...prev, { senderId, senderName, senderColor, senderAvatarStyle, senderDecorFrame, senderAvatarUrl }];
+              });
+            }
           }
 
           else if (type === "friend_challenge") {
@@ -1461,10 +1879,27 @@ export default function App() {
           else if (type === "friend_removed") {
             const { removedByName } = payload;
             setFriends(prev => prev.filter(name => name !== removedByName));
+            if (roomInfoRef.current) {
+              const targetPlayerObj = Object.values(roomInfoRef.current.players).find((p: any) => p.name === removedByName) as any;
+              if (targetPlayerObj) {
+                setSentRequests(prev => prev.filter(id => id !== targetPlayerObj.id));
+              }
+            }
             setPurchaseToast({
               text: languageRef.current === "ru"
                 ? `Игрок ${removedByName} удалил вас из друзей.`
                 : `Player ${removedByName} removed you from friends.`
+            });
+            setTimeout(() => setPurchaseToast(null), 3500);
+          }
+
+          else if (type === "friend_declined") {
+            const { declinedById, declinedByName } = payload;
+            setSentRequests(prev => prev.filter(id => id !== declinedById));
+            setPurchaseToast({
+              text: languageRef.current === "ru"
+                ? `Игрок ${declinedByName} отклонил запрос в друзья.`
+                : `Player ${declinedByName} declined friend request.`
             });
             setTimeout(() => setPurchaseToast(null), 3500);
           }
@@ -1492,6 +1927,18 @@ export default function App() {
       setErrorMsg("Failed to launch real-time module framework.");
       setConnecting(false);
     }
+  };
+  
+  const handleCancelConnecting = () => {
+    if (wsRef.current) {
+      wsRef.current.onopen = null;
+      wsRef.current.onmessage = null;
+      wsRef.current.onerror = null;
+      wsRef.current.onclose = null;
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    setConnecting(false);
   };
   
   const handlePlayButtonClick = () => {
@@ -1529,10 +1976,10 @@ export default function App() {
       owned_trails: ownedTrails,
       owned_effects: ownedEffects,
       owned_decor_frames: ownedDecorFrames,
-      eq_skin: equippedSkin,
-      eq_trail: equippedTrail,
-      eq_effect: equippedEffect,
-      eq_decor: equippedDecorFrame,
+      eq_skin: isSkinOwnedHelper(equippedSkin) ? equippedSkin : (lastSavedCosmetics.skin || "default"),
+      eq_trail: (equippedTrail === "none" || ownedTrails.includes(equippedTrail)) ? equippedTrail : "none",
+      eq_effect: (equippedEffect === "none" || ownedEffects.includes(equippedEffect)) ? equippedEffect : (lastSavedCosmetics.effect || "none"),
+      eq_decor: (equippedDecorFrame === "none" || ownedDecorFrames.includes(equippedDecorFrame)) ? equippedDecorFrame : (lastSavedCosmetics.decor || "none"),
     };
     await platformSdk.saveData(savePayload);
   };
@@ -1628,13 +2075,29 @@ export default function App() {
           if (loadedSaveData.owned_effects) setOwnedEffects(loadedSaveData.owned_effects);
           if (loadedSaveData.owned_decor_frames) setOwnedDecorFrames(loadedSaveData.owned_decor_frames);
           
+          const loadedSkins = loadedSaveData.owned_skins || ["default"];
+          const loadedTrails = loadedSaveData.owned_trails || ["none"];
+          const loadedEffects = loadedSaveData.owned_effects || ["none"];
+          const loadedDecor = loadedSaveData.owned_decor_frames || ["none"];
+
           if (loadedSaveData.eq_skin) {
-            setEquippedSkin(loadedSaveData.eq_skin);
-            finalSkin = loadedSaveData.eq_skin;
+            const isOwned = loadedSaveData.eq_skin === "default" || loadedSaveData.eq_skin === "Avatar_1.png" || loadedSkins.includes(loadedSaveData.eq_skin);
+            const verifiedSkin = isOwned ? loadedSaveData.eq_skin : "default";
+            setEquippedSkin(verifiedSkin);
+            finalSkin = verifiedSkin;
           }
-          if (loadedSaveData.eq_trail) setEquippedTrail(loadedSaveData.eq_trail);
-          if (loadedSaveData.eq_effect) setEquippedEffect(loadedSaveData.eq_effect);
-          if (loadedSaveData.eq_decor) setEquippedDecorFrame(loadedSaveData.eq_decor);
+          if (loadedSaveData.eq_trail) {
+            const isOwned = loadedSaveData.eq_trail === "none" || loadedTrails.includes(loadedSaveData.eq_trail);
+            setEquippedTrail(isOwned ? loadedSaveData.eq_trail : "none");
+          }
+          if (loadedSaveData.eq_effect) {
+            const isOwned = loadedSaveData.eq_effect === "none" || loadedEffects.includes(loadedSaveData.eq_effect);
+            setEquippedEffect(isOwned ? loadedSaveData.eq_effect : "none");
+          }
+          if (loadedSaveData.eq_decor) {
+            const isOwned = loadedSaveData.eq_decor === "none" || loadedDecor.includes(loadedSaveData.eq_decor);
+            setEquippedDecorFrame(isOwned ? loadedSaveData.eq_decor : "none");
+          }
         }
 
         const finalStyle = getStyleIdOfSkin(finalSkin);
@@ -1659,7 +2122,9 @@ export default function App() {
         
         // Auto join game lobby session
         setTimeout(() => {
-          handleJoinGame(finalName, finalColor, finalStyle, undefined, loadedPass || localStorage.getItem("admin_password") || "");
+          const urlParams = new URLSearchParams(window.location.search);
+          const initialRoomId = urlParams.get("room") || undefined;
+          handleJoinGame(finalName, finalColor, finalStyle, initialRoomId, loadedPass || localStorage.getItem("admin_password") || "");
           setIsInitialLoadDone(true);
         }, 300);
 
@@ -1669,7 +2134,9 @@ export default function App() {
         setProfName(fbName);
         setProfColor(randomColor);
         const fbPass = localStorage.getItem("admin_password") || "";
-        handleJoinGame(fbName, randomColor, 0, undefined, fbPass);
+        const urlParams = new URLSearchParams(window.location.search);
+        const initialRoomId = urlParams.get("room") || undefined;
+        handleJoinGame(fbName, randomColor, 0, initialRoomId, fbPass);
         setIsInitialLoadDone(true);
       }
     };
@@ -1694,10 +2161,26 @@ export default function App() {
     }
   }, [currentRoomId]);
 
+  // Award +5 coins custom event listener upon laser round survival
+  useEffect(() => {
+    const handleSurvivedLaserRound = (e: Event) => {
+      const customEv = e as CustomEvent;
+      const amount = customEv.detail?.amount || 5;
+      console.log(`[LaserReward] Awarding ${amount} coins for surviving laser round!`);
+      setCoins(prev => prev + amount);
+    };
+
+    document.addEventListener("survived-laser-round", handleSurvivedLaserRound);
+    return () => {
+      document.removeEventListener("survived-laser-round", handleSurvivedLaserRound);
+    };
+  }, []);
+
   useEffect(() => {
     let timer: any;
     if (connecting) {
       setShowOverlayActual(true);
+      setIsOverlayFullyGone(false);
       setLoadingProgress(5);
       
       timer = setInterval(() => {
@@ -1742,6 +2225,7 @@ export default function App() {
       } else {
         // If not connecting and not in game, show screen in idle state (0% bar)
         setShowOverlayActual(true);
+        setIsOverlayFullyGone(false);
         setLoadingProgress(0);
       }
     }
@@ -1811,6 +2295,17 @@ export default function App() {
     setCurrentRoomId(null);
     setRoomInfo(null);
     setChatMessages([]);
+
+    // Revert unowned selections
+    if (!isSkinOwnedHelper(equippedSkin)) {
+      setEquippedSkin(lastSavedCosmetics.skin);
+    }
+    if (equippedEffect !== "none" && !ownedEffects.includes(equippedEffect)) {
+      setEquippedEffect(lastSavedCosmetics.effect);
+    }
+    if (equippedDecorFrame !== "none" && !ownedDecorFrames.includes(equippedDecorFrame)) {
+      setEquippedDecorFrame(lastSavedCosmetics.decor);
+    }
   };
 
   const handleCopyInviteLink = () => {
@@ -1957,8 +2452,70 @@ export default function App() {
 
   const showIntroOverlay = !inGame || connecting;
 
+  const isRotateOverlayVisible = isMobileDevice && isPortrait && (platformSdk.getPlatform() !== "yandex" && platformSdk.getPlatform() !== "crazygames");
+
   return (
     <main className="w-screen h-screen bg-[#090a0f] selection:bg-neutral-800 selection:text-white text-white font-sans flex overflow-hidden relative">
+      {/* "Rotate Device" Landscape Lock Prompt */}
+      <AnimatePresence>
+        {isRotateOverlayVisible && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[9999] bg-[#090a0f] flex flex-col items-center justify-center p-6 text-center select-none"
+          >
+            <div className="flex flex-col items-center gap-6 max-w-sm">
+              {/* Rotating Smartphone Icon */}
+              <div className="relative w-24 h-24 flex items-center justify-center">
+                {/* Visual waves representing turning action */}
+                <div className="absolute inset-0 rounded-full bg-sky-500/5 animate-ping duration-[2000ms]"></div>
+                <div className="absolute inset-2 rounded-full bg-sky-500/10 animate-pulse"></div>
+                
+                {/* SVG Phone Rotating */}
+                <motion.div
+                  animate={{ 
+                    rotate: [0, -90, -90, 0, 0],
+                  }}
+                  transition={{
+                    duration: 3,
+                    repeat: Infinity,
+                    repeatDelay: 0.5,
+                    ease: "easeInOut"
+                  }}
+                  className="relative z-10 w-12 h-20 border-[3px] border-zinc-400 rounded-[10px] bg-zinc-950 flex items-center justify-center shadow-lg"
+                >
+                  {/* Speaker slot */}
+                  <div className="absolute top-1.5 w-6 h-[3px] bg-zinc-700 rounded-full"></div>
+                  {/* Home button circle */}
+                  <div className="absolute bottom-1 w-3.5 h-3.5 border border-zinc-700 rounded-full bg-transparent"></div>
+                  {/* Screen icon */}
+                  <div className="text-zinc-600 font-black text-[13px]">⇅</div>
+                </motion.div>
+              </div>
+
+              {/* Text messages in RU and EN */}
+              <div className="flex flex-col gap-2.5">
+                <h2 className="text-lg font-black uppercase tracking-widest text-zinc-100 font-sans">
+                  {language === "ru" ? "Переверните устройство" : "Rotate Your Device"}
+                </h2>
+                <p className="text-sm font-semibold text-zinc-400 leading-relaxed max-w-[280px]">
+                  {language === "ru" 
+                    ? "Пожалуйста, поверните телефон горизонтально для игры в альбомной ориентации" 
+                    : "Please landscape your device to enjoy the full-screen game experience"
+                  }
+                </p>
+              </div>
+
+              {/* Secondary decorative status line */}
+              <p className="text-[10px] text-zinc-600 uppercase font-bold tracking-widest font-mono">
+                {language === "ru" ? "Работает на ПК-версии интерфейса" : "Powered by PC-Engine UI"}
+              </p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Purchase success non-blocking toast */}
       <AnimatePresence>
         {purchaseToast && (
@@ -2030,22 +2587,47 @@ export default function App() {
                 messages={chatMessages}
                 graphicsQuality={graphicsQuality}
                 avatarShopOpen={isAvatarShopOpen}
+                editingProfile={editingProfile}
                 avatars={loadedAvatars}
+                avatarsTimestamp={avatarsTimestamp}
                 uiScale={uiScale}
+                showHitboxes={showHitboxes}
+                isChatVisible={isChatVisible}
+                coins={coins}
+                onAddCoins={() => setIsBuyCoinsModalOpen(true)}
+                language={language}
+                onOpenShop={handleOpenShop}
               />
             </div>
           )}
 
           {/* Top-Left controls container */}
           <div 
-            className="absolute top-5 left-5 z-20 flex flex-col gap-4 items-start pointer-events-none transition-all duration-[400ms]"
-            style={isMobile ? undefined : { transform: `scale(${uiScale})`, transformOrigin: "top left" }}
+            className={`absolute z-20 flex flex-col items-start pointer-events-none ${
+              isMobileDevice 
+                ? "top-4 left-4 gap-2" 
+                : "top-2.5 left-2.5 md:top-5 md:left-5 gap-2.5 md:gap-4"
+            }`}
+            style={isMobile ? undefined : {
+              transform: `scale(${uiScale})`,
+              transformOrigin: "top left",
+              transition: "transform 400ms cubic-bezier(0.16, 1, 0.3, 1)"
+            }}
           >
             {/* Round action buttons */}
-            <div className="flex gap-3 pointer-events-auto relative">
+            <div className="flex gap-2 md:gap-3 pointer-events-auto relative">
               <button
-                onClick={() => setEditingProfile(prev => !prev)}
-                className={`w-12 h-12 md:w-9 md:h-9 rounded-full flex items-center justify-center transition-all cursor-pointer shadow-lg ${
+                onClick={() => {
+                  if (isAvatarShopOpen) {
+                    handleCloseShop();
+                  }
+                  setEditingProfile(prev => !prev);
+                }}
+                className={`${
+                  isMobileDevice
+                    ? "w-11 h-11"
+                    : "w-12 h-12 md:w-9 md:h-9"
+                } rounded-full flex items-center justify-center transition-all cursor-pointer shadow-lg ${
                   editingProfile
                     ? "bg-white text-black font-semibold"
                     : "bg-black/80 text-white hover:bg-neutral-800"
@@ -2054,7 +2636,11 @@ export default function App() {
               >
                 <img 
                   src={settingsIconUrl} 
-                  className={`w-5.5 h-5.5 md:w-[17px] md:h-[17px] transition-all object-contain ${
+                  className={`${
+                    isMobileDevice
+                      ? "w-[22px] h-[22px]"
+                      : "w-5.5 h-5.5 md:w-[17px] md:h-[17px]"
+                  } transition-all object-contain ${
                     editingProfile ? "brightness-0" : "brightness-0 invert"
                   }`} 
                   alt="Settings" 
@@ -2064,7 +2650,11 @@ export default function App() {
               <div className="relative">
                 <button
                   onClick={() => setIsChatVisible(prev => !prev)}
-                  className={`w-12 h-12 md:w-9 md:h-9 rounded-full flex items-center justify-center transition-all cursor-pointer shadow-lg ${
+                  className={`${
+                    isMobileDevice
+                      ? "w-11 h-11"
+                      : "w-12 h-12 md:w-9 md:h-9"
+                  } rounded-full flex items-center justify-center transition-all cursor-pointer shadow-lg ${
                     isChatVisible
                       ? "bg-white text-black font-semibold"
                       : "bg-black/80 text-white hover:bg-neutral-800"
@@ -2073,7 +2663,11 @@ export default function App() {
                 >
                   <img 
                     src={chatIconUrl} 
-                    className={`w-5.5 h-5.5 md:w-[17px] md:h-[17px] transition-all object-contain ${
+                    className={`${
+                      isMobileDevice
+                        ? "w-[22px] h-[22px]"
+                        : "w-5.5 h-5.5 md:w-[17px] md:h-[17px]"
+                    } transition-all object-contain ${
                       isChatVisible ? "brightness-0" : "brightness-0 invert"
                     }`} 
                     alt="Chat" 
@@ -2094,7 +2688,11 @@ export default function App() {
                     handleOpenShop();
                   }
                 }}
-                className={`w-12 h-12 md:w-9 md:h-9 rounded-full flex items-center justify-center transition-all cursor-pointer shadow-lg ${
+                className={`${
+                  isMobileDevice
+                    ? "w-11 h-11"
+                    : "w-12 h-12 md:w-9 md:h-9"
+                } rounded-full flex items-center justify-center transition-all cursor-pointer shadow-lg ${
                   isAvatarShopOpen
                     ? "bg-white text-black font-semibold animate-pulse"
                     : "bg-black/80 text-white hover:bg-neutral-800"
@@ -2103,13 +2701,34 @@ export default function App() {
               >
                 <img 
                   src={avatarIconUrl} 
-                  className={`w-5.5 h-5.5 md:w-[17px] md:h-[17px] transition-all object-contain ${
+                  className={`${
+                    isMobileDevice
+                      ? "w-[22px] h-[22px]"
+                      : "w-5.5 h-5.5 md:w-[17px] md:h-[17px]"
+                  } transition-all object-contain ${
                     isAvatarShopOpen ? "brightness-0" : "brightness-0 invert"
                   }`} 
                   alt="Avatar Customizer" 
                   referrerPolicy="no-referrer"
                 />
               </button>
+              {platformSdk.getPlatform() !== "yandex" && platformSdk.getPlatform() !== "crazygames" && (
+                <button
+                  onClick={toggleFullscreen}
+                  className={`${
+                    isMobileDevice
+                      ? "w-11 h-11"
+                      : "w-12 h-12 md:w-9 md:h-9"
+                  } rounded-full flex items-center justify-center transition-all cursor-pointer shadow-lg bg-black/80 text-white hover:bg-neutral-800`}
+                  title={language === "ru" ? (isFullscreen ? "Выйти из полноэкранного режима" : "Полноэкранный режим") : (isFullscreen ? "Exit Fullscreen" : "Fullscreen")}
+                >
+                  {isFullscreen ? (
+                    <Minimize className={isMobileDevice ? "w-[22px] h-[22px]" : "w-5.5 h-5.5 md:w-[17px] md:h-[17px]"} />
+                  ) : (
+                    <Maximize className={isMobileDevice ? "w-[22px] h-[22px]" : "w-5.5 h-5.5 md:w-[17px] md:h-[17px]"} />
+                  )}
+                </button>
+              )}
             </div>
 
             {/* Mobile Mini Messages (only visible when chat hidden on mobile) */}
@@ -2138,15 +2757,14 @@ export default function App() {
             )}
 
             {/* Desktop Chatbox below buttons */}
-            <div className="hidden md:block">
+            <div className={isMobileDevice ? "block" : "hidden md:block"}>
               <AnimatePresence>
                 {isChatVisible && (
                   <motion.div
-                    initial={{ opacity: 0, y: -15, scale: 0.95 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, y: -15, scale: 0.95 }}
-                    transition={{ type: "spring", stiffness: 260, damping: 22 }}
-                    className="origin-top"
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 20 }}
+                    transition={{ type: "tween", ease: "easeOut", duration: 0.3 }}
                   >
                     <ChatBox
                       messages={chatMessages}
@@ -2158,6 +2776,7 @@ export default function App() {
                       selfNameEffect={equippedEffect}
                       selfColor={profColor}
                       selfName={profName}
+                      selfAvatarUrl={sdkAvatarUrl || undefined}
                       language={language}
                     />
                   </motion.div>
@@ -2167,13 +2786,13 @@ export default function App() {
           </div>
 
           {/* Mobile ChatBox (Bottom Drawer) - fixed and height-locked to prevent soft keyboard compression */}
-          <div className="md:hidden fixed bottom-0 left-0 w-full z-40 pointer-events-none overflow-hidden">
+          <div className={`${isMobileDevice ? "hidden" : "md:hidden"} fixed bottom-0 left-0 w-full z-40 pointer-events-none overflow-hidden`}>
             <AnimatePresence>
                {isChatVisible && (
                   <motion.div
-                     initial={{ y: "100%" }}
-                     animate={{ y: 0 }}
-                     exit={{ y: "100%" }}
+                     initial={{ y: "100%", opacity: 0.8 }}
+                     animate={{ y: 0, opacity: 1 }}
+                     exit={{ y: "100%", opacity: 0.8 }}
                      transition={{ 
                         type: "tween", 
                         ease: [0.16, 1, 0.3, 1], 
@@ -2181,8 +2800,7 @@ export default function App() {
                      }}
                      className="w-full pointer-events-auto"
                      style={{ 
-                        height: mobileChatHeight ? `${mobileChatHeight}px` : "78vh",
-                        willChange: "transform"
+                        height: mobileChatHeight ? `${mobileChatHeight}px` : "78vh"
                      }}
                   >
                      <ChatBox 
@@ -2196,6 +2814,7 @@ export default function App() {
                         selfNameEffect={equippedEffect}
                         selfColor={profColor}
                         selfName={profName}
+                        selfAvatarUrl={sdkAvatarUrl || undefined}
                         language={language}
                      />
                   </motion.div>
@@ -2203,9 +2822,48 @@ export default function App() {
             </AnimatePresence>
           </div>
 
-          {/* Virtual Dynamic / Floating Joystick for Mobile */}
-          {isMobile && !editingProfile && !isChatVisible && (
-            <DynamicJoystick joystickRef={joystickVector} />
+          {/* Mobile Jump Button */}
+          {(isMobile || isMobileDevice) && !editingProfile && !isAvatarShopOpen && (
+            <motion.button
+              type="button"
+              initial={{ opacity: 0, scale: 0.8 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.8 }}
+              whileTap={{ scale: 0.90 }}
+              transition={{ type: "spring", damping: 15, stiffness: 200 }}
+              onPointerDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                try {
+                  (e.currentTarget as HTMLButtonElement).setPointerCapture(e.pointerId);
+                } catch (err) {}
+                window.dispatchEvent(new CustomEvent("local-player-jump"));
+                window.dispatchEvent(new CustomEvent("local-player-jump-held", { detail: { active: true } }));
+              }}
+              onPointerUp={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                try {
+                  (e.currentTarget as HTMLButtonElement).releasePointerCapture(e.pointerId);
+                } catch (err) {}
+                window.dispatchEvent(new CustomEvent("local-player-jump-held", { detail: { active: false } }));
+              }}
+              onPointerCancel={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                try {
+                  (e.currentTarget as HTMLButtonElement).releasePointerCapture(e.pointerId);
+                } catch (err) {}
+                window.dispatchEvent(new CustomEvent("local-player-jump-held", { detail: { active: false } }));
+              }}
+              className="fixed right-10 bottom-12 w-[76px] h-[76px] rounded-full bg-black/40 backdrop-blur-[3px] flex items-center justify-center z-[50] pointer-events-auto touch-none select-none outline-none cursor-pointer group"
+              style={{
+                userSelect: "none",
+                WebkitUserSelect: "none",
+              }}
+            >
+              <ArrowUp className="w-8 h-8 text-white stroke-[2.5]" />
+            </motion.button>
           )}
 
           {/* Settings Overlay Modal */}
@@ -2233,16 +2891,24 @@ export default function App() {
                   )}
                 </AnimatePresence>
 
-                <div
-                  className="pointer-events-auto transition-all duration-[400ms] w-full h-full md:w-auto md:h-auto"
-                  style={isMobile ? undefined : { transform: `scale(${uiScale})`, transformOrigin: "center" }}
+                 <div
+                  className="pointer-events-auto flex items-center justify-center w-full h-full md:w-auto md:h-auto"
+                  style={isMobileDevice || window.innerHeight < 550 ? undefined : {
+                    transform: `scale(${uiScale})`,
+                    transformOrigin: "center",
+                    transition: "transform 400ms cubic-bezier(0.16, 1, 0.3, 1)"
+                  }}
                 >
                   <motion.div
-                    initial={isMobile ? { opacity: 0, y: "100%" } : { opacity: 0, scale: 0.95 }}
-                    animate={isMobile ? { opacity: 1, y: 0 } : { opacity: 1, scale: 1 }}
-                    exit={isMobile ? { opacity: 0, y: "100%" } : { opacity: 0, scale: 0.95 }}
-                    transition={{ type: "tween", ease: "easeOut", duration: 0.25 }}
-                    className="bg-zinc-950/95 backdrop-blur-2xl text-white flex flex-col gap-5 shadow-3xl w-full h-full md:h-[85vh] md:max-h-[640px] md:w-[92vw] md:max-w-[620px] p-6 md:p-8 rounded-none md:squircle-panel border-0 overflow-hidden fixed inset-0 md:relative"
+                    initial={isMobileDevice || window.innerHeight < 550 ? { opacity: 0, scale: 0.9, y: 15 } : { opacity: 0, y: 25 }}
+                    animate={isMobileDevice || window.innerHeight < 550 ? { opacity: 1, scale: 1, y: 0 } : { opacity: 1, y: 0 }}
+                    exit={isMobileDevice || window.innerHeight < 550 ? { opacity: 0, scale: 0.9, y: 15 } : { opacity: 0, y: 25 }}
+                    transition={{ type: "tween", ease: "easeOut", duration: 0.3 }}
+                    className={`bg-zinc-950 text-white flex flex-col shadow-3xl overflow-hidden border-0 ${
+                      (isMobileDevice || window.innerHeight < 550)
+                        ? "w-[96vw] max-w-[500px] h-[96vh] p-3.5 rounded-2xl gap-3 relative"
+                        : "w-full h-full md:h-[85vh] md:max-h-[640px] md:w-[92vw] md:max-w-[620px] p-6 md:p-8 md:squircle-panel gap-5 md:relative"
+                    }`}
                   >
                     {/* Header: Title and Tab Selection */}
                     <div className="shrink-0 flex flex-col gap-3">
@@ -2273,12 +2939,19 @@ export default function App() {
                     </div>
 
                     {/* Scrollable Container Content Body */}
-                    <div className="flex-1 overflow-y-auto pr-1 pb-16 flex flex-col gap-6 custom-scrollbar">
+                    <div className={`flex-1 overflow-y-auto pr-1 flex flex-col gap-6 custom-scrollbar ${
+                      (isMobileDevice || window.innerHeight < 550) ? "pb-4" : "pb-16"
+                    }`}>
                       {activeOverlayTab === "settings" ? (
                         <>
                           {/* SDK Auth status reminder */}
                           {sdkAuthWarning && (
-                            <div className="bg-yellow-500/10 border border-yellow-500/20 text-yellow-400 p-4 rounded-2xl flex flex-col items-center justify-between gap-3 text-xs font-semibold backdrop-blur-md mb-2 shrink-0 animate-fade-in animate-pulse-subtle">
+                            <motion.div
+                              initial={{ opacity: 0, y: 15 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              transition={{ duration: 0.35, ease: "easeOut", delay: 0.04 }}
+                              className="bg-yellow-500/10 border border-yellow-500/20 text-yellow-400 p-4 rounded-2xl flex flex-col items-center justify-between gap-3 text-xs font-semibold backdrop-blur-md mb-2 shrink-0 animate-pulse-subtle"
+                            >
                               <div className="flex items-center gap-2">
                                 <AlertCircle className="w-5 h-5 shrink-0 text-yellow-500" />
                                 <span className="text-left font-sans">{sdkAuthWarning}</span>
@@ -2314,11 +2987,16 @@ export default function App() {
                               >
                                 {language === "ru" ? "Войти в аккаунт" : "Sign In to Save"}
                               </button>
-                            </div>
+                            </motion.div>
                           )}
 
                           {/* Nickgroup / Customizer */}
-                          <div className="flex flex-col gap-4">
+                          <motion.div
+                            initial={{ opacity: 0, y: 15 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: 0.35, ease: "easeOut", delay: 0.08 }}
+                            className="flex flex-col gap-4"
+                          >
                             <div className="flex items-center justify-between">
                               <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest font-mono">
                                 {t.operatorConfig}
@@ -2401,6 +3079,26 @@ export default function App() {
                                           <span>{purgeMessage.text}</span>
                                         </motion.div>
                                       )}
+
+                                      {/* Hitbox visualization toggle switch for Admin */}
+                                      <div className="flex items-center justify-between p-3 squircle-card bg-white/5 border border-white/5 mt-0.5">
+                                        <span className="text-[11px] font-semibold text-zinc-300">
+                                          {language === "ru" ? "Показывать хитбоксы" : "Show Hitboxes"}
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={() => setShowHitboxes(!showHitboxes)}
+                                          className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                                            showHitboxes ? "bg-teal-500" : "bg-zinc-700"
+                                          }`}
+                                        >
+                                          <span
+                                            className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                                              showHitboxes ? "translate-x-4" : "translate-x-0"
+                                            }`}
+                                          />
+                                        </button>
+                                      </div>
                                     </div>
                                   ) : (
                                     <>
@@ -2432,10 +3130,15 @@ export default function App() {
                                 </motion.div>
                               )}
                             </AnimatePresence>
-                          </div>
+                          </motion.div>
 
                           {/* Graphics Quality Control Slider */}
-                          <div className="flex flex-col gap-3 pt-4">
+                          <motion.div
+                            initial={{ opacity: 0, y: 15 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: 0.35, ease: "easeOut", delay: 0.12 }}
+                            className="flex flex-col gap-3 pt-4"
+                          >
                             <div className="flex justify-between items-center">
                               <div className="flex flex-col">
                                 <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest font-mono">
@@ -2449,28 +3152,31 @@ export default function App() {
                                 {graphicsQuality === 1 && t.low}
                                 {graphicsQuality === 2 && t.medium}
                                 {graphicsQuality === 3 && t.high}
-                                {graphicsQuality === 4 && t.ultra}
                               </span>
                             </div>
                             <input
                               type="range"
                               min="1"
-                              max="4"
+                              max="3"
                               step="1"
                               value={graphicsQuality}
                               onChange={(e) => handleGraphicsChange(parseInt(e.target.value))}
                               className="w-full h-1 bg-white/10 accent-white rounded-lg cursor-pointer appearance-none"
                             />
-                            <div className="flex justify-between text-[8px] text-zinc-500 font-bold px-0.5 uppercase leading-none mt-1">
-                              <span>{t.low}</span>
-                              <span>{t.medium}</span>
-                              <span>{t.high}</span>
-                              <span>{t.ultra}</span>
+                            <div className="relative text-[8px] text-zinc-500 font-bold px-0.5 uppercase leading-none mt-1 h-3">
+                              <span className="absolute left-0">{t.low}</span>
+                              <span className="absolute left-1/2 -translate-x-1/2 whitespace-nowrap">{t.medium}</span>
+                              <span className="absolute right-0">{t.high}</span>
                             </div>
-                          </div>
+                          </motion.div>
 
                           {/* Sound Volume Slider with dynamic mute indicators */}
-                          <div className="flex flex-col gap-3 pt-4">
+                          <motion.div
+                            initial={{ opacity: 0, y: 15 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: 0.35, ease: "easeOut", delay: 0.16 }}
+                            className="flex flex-col gap-3 pt-4"
+                          >
                             <div className="flex justify-between items-center">
                               <div className="flex flex-col">
                                 <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest font-mono">
@@ -2502,10 +3208,15 @@ export default function App() {
                                 className="w-full h-1 bg-white/15 accent-white rounded-lg cursor-pointer appearance-none"
                               />
                             </div>
-                          </div>
+                          </motion.div>
 
                           {/* Language Settings */}
-                          <div className="flex flex-col gap-4 pt-4">
+                          <motion.div
+                            initial={{ opacity: 0, y: 15 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: 0.35, ease: "easeOut", delay: 0.2 }}
+                            className="flex flex-col gap-4 pt-4"
+                          >
                             <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest font-mono">
                               {language === "ru" ? "Глобализация" : "Globalization"}
                             </span>
@@ -2570,10 +3281,15 @@ export default function App() {
                                 </button>
                               </div>
                             </div>
-                          </div>
+                          </motion.div>
 
                           {/* Room Players list with invitation button */}
-                          <div className="flex flex-col gap-3 pt-4">
+                          <motion.div
+                            initial={{ opacity: 0, y: 15 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: 0.35, ease: "easeOut", delay: 0.24 }}
+                            className="flex flex-col gap-3 pt-4"
+                          >
                             <div className="flex items-center justify-between">
                               <div className="flex flex-col">
                                 <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest font-mono">
@@ -2606,12 +3322,12 @@ export default function App() {
                               </div>
                             </div>
 
-                            <div className="flex flex-col gap-2 max-h-[160px] overflow-y-auto pr-0.5 pt-3">
+                            <div className="flex flex-col gap-2 pt-3">
                               {roomInfo && Object.values(roomInfo.players).length > 0 ? (
                                 Object.values(roomInfo.players as Record<string, Player>).map((p: Player) => (
                                   <div
                                     key={p.id}
-                                    className="flex items-center justify-between p-2.5 bg-white/5 squircle-card border-0"
+                                    className="flex items-center justify-between p-2.5 bg-white/5 hover:bg-white/10 transition-colors duration-200 squircle-card border-0"
                                   >
                                     <div className="flex items-center gap-3 pr-2 truncate flex-1">
                                       {friends.includes(p.name) && (
@@ -2622,10 +3338,13 @@ export default function App() {
                                           <span className="decor-crown-badge !text-[8px] !top-[-6px]">👑</span>
                                         )}
                                         <div
-                                          className="w-7 h-7 rounded-full flex items-center justify-center font-black text-xs select-none shadow-inner text-white relative"
-                                          style={{ backgroundColor: p.color }}
+                                          className="w-7 h-7 rounded-full flex items-center justify-center font-black text-xs select-none shadow-inner text-white relative bg-cover bg-center"
+                                          style={{ 
+                                            backgroundColor: p.color,
+                                            backgroundImage: p.avatarUrl ? `url(${p.avatarUrl})` : "none"
+                                          }}
                                         >
-                                          {p.name.charAt(0).toUpperCase()}
+                                          {!p.avatarUrl && p.name.charAt(0).toUpperCase()}
                                           
                                           {/* Frame ring overlays */}
                                           <AvatarFrame decorFrame={p.decorFrame} playerColor={p.color} />
@@ -2656,7 +3375,7 @@ export default function App() {
                                               <button
                                                 type="button"
                                                 onClick={() => handleRemoveFriend(p.name)}
-                                                className="px-2.5 py-1.5 bg-zinc-800/60 hover:bg-red-950/40 text-zinc-400 hover:text-red-400 rounded-xl text-[10px] font-bold uppercase transition border border-white/5 hover:border-red-500/20 shrink-0 cursor-pointer whitespace-nowrap"
+                                                className="px-2.5 py-1.5 bg-zinc-850 hover:bg-red-950/40 text-zinc-400 hover:text-red-400 squircle-btn text-[10px] font-bold uppercase transition hover:border-red-500/20 shrink-0 cursor-pointer whitespace-nowrap border-0"
                                               >
                                                 {t.removeFriendBtn}
                                               </button>
@@ -2666,8 +3385,12 @@ export default function App() {
                                               <button
                                                 type="button"
                                                 disabled
-                                                className="px-2.5 py-1.5 bg-zinc-800/60 text-zinc-500 rounded-xl text-[10px] font-bold uppercase cursor-not-allowed border border-white/5 shrink-0 select-none whitespace-nowrap"
+                                                className="px-2.5 py-1.5 bg-zinc-800/40 text-zinc-500 squircle-btn text-[10px] font-bold uppercase cursor-not-allowed shrink-0 select-none whitespace-nowrap flex items-center justify-center gap-1.5 border-0"
                                               >
+                                                <svg className="animate-spin h-3.5 w-3.5 text-zinc-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                                </svg>
                                                 {t.pendingFriend}
                                               </button>
                                             );
@@ -2676,7 +3399,7 @@ export default function App() {
                                               <button
                                                 type="button"
                                                 onClick={() => handleSendFriendRequest(p.id)}
-                                                className="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 active:scale-95 text-zinc-200 rounded-xl text-[10px] font-bold uppercase transition border border-white/5 shrink-0 cursor-pointer whitespace-nowrap"
+                                                className="px-2.5 py-1.5 bg-white hover:bg-zinc-100 active:scale-95 text-zinc-950 squircle-btn text-[10px] font-bold uppercase transition shrink-0 cursor-pointer whitespace-nowrap border-0"
                                               >
                                                 {t.addFriendBtn}
                                               </button>
@@ -2702,10 +3425,15 @@ export default function App() {
                                 </div>
                               )}
                             </div>
-                          </div>
+                          </motion.div>
 
                           {/* Danger Zone: Reset Account */}
-                          <div className="flex flex-col gap-3.5 pt-4 border-t border-white/10 shrink-0 select-none">
+                          <motion.div
+                            initial={{ opacity: 0, y: 15 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: 0.35, ease: "easeOut", delay: 0.28 }}
+                            className="flex flex-col gap-3.5 pt-4 border-t border-white/10 shrink-0 select-none"
+                          >
                             <span className="text-[10px] text-red-400 font-bold uppercase tracking-widest font-mono">
                               {language === "ru" ? "⚠️ Опасная зона" : "⚠️ Danger Zone"}
                             </span>
@@ -2748,53 +3476,56 @@ export default function App() {
                                 </button>
                               )}
                             </div>
-                          </div>
+                          </motion.div>
                         </>
                       ) : (
                         /* Servers (Separate Section Page) tab */
                         <div className="flex flex-col gap-4">
-                          <div className="flex flex-col gap-0.5">
-                            <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest font-mono">{t.availableRooms}</span>
+                          <motion.div
+                            initial={{ opacity: 0, y: 15 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: 0.35, ease: "easeOut", delay: 0.04 }}
+                            className="flex flex-col gap-0.5 select-none"
+                          >
                             {(() => {
                               const info = getActiveServerInfo(language);
-                              const pingStr = currentPing !== null ? ` (${currentPing}ms)` : "";
-                              const pingStrRu = currentPing !== null ? ` (${currentPing}мс)` : "";
-                              const displayPing = language === "ru" ? pingStrRu : pingStr;
+                              const displayPing = currentPing !== null 
+                                ? ` (${currentPing} ${language === "ru" ? "мс" : "ms"})` 
+                                : "";
                               return (
-                                <span className="text-[11px] text-zinc-500 mt-1 font-sans tracking-wide">
+                                <span className="text-[11.5px] text-zinc-400 font-sans tracking-wide font-medium">
                                   {language === "ru" 
-                                    ? `Подключено: ${info.name}${displayPing} • ${info.location}`
-                                    : `Connected: ${info.name}${displayPing} • ${info.location}`
+                                    ? `Подключено: ${info.name}${displayPing}`
+                                    : `Connected: ${info.name}${displayPing}`
                                   }
                                 </span>
                               );
                             })()}
-                          </div>
+                          </motion.div>
 
-                          {/* Create Private Server & Administrative Shutdown Buttons */}
-                          <div className="flex flex-col gap-2.5 shrink-0">
-                            {isAdmin && (
-                              <button
-                                type="button"
-                                onClick={handleAdminShutdownAllPrompt}
-                                className="w-full py-3 bg-red-600 hover:bg-red-700 active:scale-95 text-white squircle-btn border-0 text-xs font-bold uppercase tracking-widest transition cursor-pointer flex items-center justify-center gap-1.5 shadow-md shrink-0 font-sans"
-                              >
-                                Shut down all
-                              </button>
-                            )}
-
-                            <button
+                          {/* Extra Administrative Shutdown button (Only for Admin) */}
+                          {isAdmin && (
+                            <motion.button
+                              initial={{ opacity: 0, y: 15 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              transition={{ duration: 0.35, ease: "easeOut", delay: 0.08 }}
                               type="button"
-                              onClick={() => setIsCreatePrivateModalOpen(true)}
-                              className="w-full py-3 bg-white text-black hover:bg-zinc-200 squircle-btn border-0 text-xs font-bold uppercase tracking-widest transition cursor-pointer flex items-center justify-center gap-1.5 shadow-md shrink-0 font-sans"
+                              onClick={handleAdminShutdownAllPrompt}
+                              className="w-full py-3 bg-red-600 hover:bg-red-700 active:scale-95 text-white squircle-btn border-0 text-xs font-bold uppercase tracking-widest transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-md shrink-0 font-sans"
                             >
-                              {t.createPrivateRoomAction}
-                            </button>
-                          </div>
+                              Shut down all
+                            </motion.button>
+                          )}
 
                           {/* Filter Inputs block */}
-                          <div className="flex flex-col gap-2 bg-white/5 p-3 squircle-card border-0">
-                            <div className="relative">
+                          <motion.div
+                            initial={{ opacity: 0, y: 15 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: 0.35, ease: "easeOut", delay: 0.12 }}
+                            className="flex flex-col gap-2.5 bg-white/5 p-3.5 squircle-card border-0 select-none"
+                          >
+                            {/* Search */}
+                            <div className="relative w-full">
                               <Search className="absolute left-3 top-2.5 w-3.5 h-3.5 text-zinc-500 pointer-events-none" />
                               <input
                                 type="text"
@@ -2804,37 +3535,86 @@ export default function App() {
                                 className="w-full bg-black/20 pl-9 pr-4 py-2 text-xs text-white squircle-btn border-0 outline-none focus:bg-black/40 transition-all font-medium placeholder-zinc-500"
                               />
                             </div>
-                            <div className="flex gap-1">
-                              {(["all", "available", "full"] as const).map((tag) => (
-                                <button
-                                  key={tag}
-                                  type="button"
-                                  onClick={() => setRoomFilter(tag)}
-                                  className={`flex-1 py-1.5 text-[9px] font-black uppercase tracking-wider squircle-btn border-0 transition duration-200 cursor-pointer ${
-                                    roomFilter === tag
-                                      ? "bg-white text-black font-bold font-sans"
-                                      : "bg-white/5 text-zinc-400 hover:bg-white/10 font-sans"
-                                  }`}
-                                >
-                                  {tag === "all" ? t.filterAll : tag === "available" ? t.filterAvailable : t.filterFull}
-                                </button>
-                              ))}
+
+                            {/* Row structure: 3 buttons (убывание, возрастание, свободные) */}
+                            <div className="flex gap-1.5 w-full">
+                              {(["desc", "asc", "free"] as const).map((tag) => {
+                                const isActive = roomFilter === tag;
+                                let label = "";
+                                if (tag === "desc") {
+                                  label = language === "ru" ? "Убывание" : "Max Players";
+                                } else if (tag === "asc") {
+                                  label = language === "ru" ? "Возрастание" : "Min Players";
+                                } else {
+                                  label = language === "ru" ? "Свободные" : "Free Only";
+                                }
+
+                                return (
+                                  <button
+                                    key={tag}
+                                    type="button"
+                                    onClick={() => setRoomFilter(tag)}
+                                    className={`flex-1 py-1.5 text-[9.5px] font-black uppercase tracking-wider squircle-btn border-0 transition duration-200 cursor-pointer ${
+                                      isActive
+                                        ? "bg-white text-black font-semibold font-sans shadow-md"
+                                        : "bg-transparent text-zinc-400 hover:bg-white/10 font-sans"
+                                    }`}
+                                  >
+                                    {label}
+                                  </button>
+                                );
+                              })}
                             </div>
-                          </div>
+                          </motion.div>
 
                           {/* 1. SECTION: ACTIVE PLAYERS LOBBIES */}
                           <div className="flex flex-col gap-2.5">
-                            <h3 className="text-xs font-bold text-zinc-400 tracking-wider uppercase flex items-center gap-1.5 font-mono">
-                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
-                              {t.activeServersHeading} ({availableRooms.length})
-                            </h3>
-                            <div className="flex flex-col gap-2 max-h-[240px] overflow-y-auto pr-0.5 scrollbar-thin">
+                            <motion.div
+                              initial={{ opacity: 0, y: 15 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              transition={{ duration: 0.35, ease: "easeOut", delay: 0.16 }}
+                              className="flex items-center justify-between select-none"
+                            >
+                              <h3 className="text-xs font-bold text-zinc-400 tracking-wider uppercase flex items-center gap-1.5 font-mono">
+                                <div className="relative flex h-2.5 w-2.5 items-center justify-center shrink-0 ml-1.5 mr-1">
+                                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                  <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                                </div>
+                                {t.activeServersHeading} ({availableRooms.length})
+                              </h3>
+
+                              <button
+                                type="button"
+                                onClick={() => setIsCreatePrivateModalOpen(true)}
+                                className="px-3 py-1.5 bg-white hover:bg-zinc-200 active:scale-95 text-black squircle-btn border-0 text-[10px] font-black transition flex items-center gap-1.5 cursor-pointer font-sans shadow-md"
+                              >
+                                <span className="text-[13px] font-black leading-none relative -top-[0.5px]">+</span>
+                                <span>{language === "ru" ? "Приватный сервер" : "Private Server"}</span>
+                              </button>
+                            </motion.div>
+
+                            <div className="flex flex-col gap-4 max-h-[420px] overflow-y-auto pr-0.5 scrollbar-thin">
                               {(() => {
                                 const filtered = availableRooms.filter((room) => {
                                   const matchesSearch = room.name.toLowerCase().includes(roomSearch.toLowerCase()) || room.id.toLowerCase().includes(roomSearch.toLowerCase());
                                   const count = room.activePlayers;
-                                  if (roomFilter === "available") return matchesSearch && count < 5;
-                                  if (roomFilter === "full") return matchesSearch && count >= 5;
+
+                                  // Client-side privacy filtering
+                                  if (room.mode === "only_me") {
+                                    const isOwner = room.creatorId === playerId;
+                                    if (!isOwner) {
+                                      return false;
+                                    }
+                                  }
+                                  if (room.mode === "friends") {
+                                    const isOwner = room.creatorId === playerId;
+                                    const isOwnerFriend = room.creatorName ? friends.includes(room.creatorName) : false;
+                                    if (!isOwner && !isOwnerFriend) {
+                                      return false;
+                                    }
+                                  }
+
+                                  if (roomFilter === "free") return matchesSearch && count < 10;
                                   return matchesSearch;
                                 });
 
@@ -2847,88 +3627,125 @@ export default function App() {
                                   );
                                 }
 
-                                return filtered.map((room) => {
+                                const sortedRooms = [...filtered].sort((a, b) => {
+                                  if (roomFilter === "asc") {
+                                    return a.activePlayers - b.activePlayers;
+                                  }
+                                  return b.activePlayers - a.activePlayers;
+                                });
+
+                                const renderRoomCard = (room: RoomStats, index: number) => {
                                   const isCurrent = room.id === currentRoomId;
-                                  const isFull = room.activePlayers >= 5;
+                                  const isFull = room.activePlayers >= 10;
+                                  const isPrivate = room.id.startsWith("private-");
+
+                                  const cardBgStyle = isPrivate
+                                    ? "bg-[#201035]/90 hover:bg-[#2c164a]/90 shadow-md"
+                                    : "bg-white/5 hover:bg-white/10 shadow-sm";
+
                                   return (
-                                    <div
+                                    <motion.div
                                       key={room.id}
-                                      className="flex items-center justify-between p-3 bg-white/5 squircle-card border-0 hover:bg-white/10 transition-all gap-4"
+                                      initial={{ opacity: 0, y: 20 }}
+                                      animate={{ opacity: 1, y: 0 }}
+                                      transition={{ duration: 0.35, ease: "easeOut", delay: 0.18 + index * 0.04 }}
+                                      className={`flex flex-col justify-between items-center p-3.5 transition-colors duration-200 squircle-card h-[175px] w-full text-center relative select-none ${cardBgStyle}`}
                                     >
-                                      <div className="flex flex-col gap-1.5 flex-1 min-w-0">
-                                        <div className="flex items-center gap-2 flex-wrap">
-                                          <Server className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
-                                          <span className="text-xs font-bold text-white truncate max-w-[130px]">{room.name}</span>
+                                      {/* Centered top name and badges */}
+                                      <div className="flex flex-col gap-1 items-center w-full min-w-0">
+                                        <span className="text-xs font-black text-white truncate w-full px-1 font-sans" title={room.name}>
+                                          {room.name}
+                                        </span>
+                                        <div className="flex items-center gap-1.5 font-mono select-none">
+                                          <span className={`text-[9px] px-1.5 py-0.5 font-bold rounded-lg bg-black/40 ${
+                                            isFull ? "text-red-400" : "text-zinc-400"
+                                          }`}>
+                                            {room.activePlayers} / 10
+                                          </span>
                                           {room.mode === "only_me" && (
-                                            <span className="text-[9px] px-1.5 py-0.5 bg-red-500/15 text-red-300 border border-red-500/30 font-bold squircle-btn uppercase tracking-wide">
-                                              🔒 {language === "ru" ? "Для себя" : "Only me"}
+                                            <span className="text-[8px] px-1.5 py-0.5 bg-red-500/15 text-red-300 rounded-md uppercase font-bold" title={language === "ru" ? "Для себя" : "Only me"}>
+                                              🔒
                                             </span>
                                           )}
                                           {room.mode === "friends" && (
-                                            <span className="text-[9px] px-1.5 py-0.5 bg-sky-500/15 text-sky-300 border border-sky-500/30 font-bold squircle-btn uppercase tracking-wide">
-                                              👥 {language === "ru" ? "Для друзей" : "Friends"}
+                                            <span className="text-[8px] px-1.5 py-0.5 bg-sky-500/15 text-sky-400 rounded-md uppercase font-bold" title={language === "ru" ? "Для друзей" : "Friends"}>
+                                              👥
                                             </span>
                                           )}
-                                          <span className={`text-[10px] px-1.5 py-0.5 font-mono font-bold squircle-btn bg-black/40 ${
-                                            isFull ? "text-red-400 border-0" : "text-emerald-400 border-0"
-                                          }`}>
-                                            {room.activePlayers} / 5
-                                          </span>
-                                        </div>
-
-                                        {/* Player Indicators */}
-                                        <div className="flex gap-1.5 items-center flex-wrap pt-0.5">
-                                          {room.players && room.players.length > 0 ? (
-                                            room.players.map((p: any) => (
-                                              <div key={p.id} className="relative shrink-0 flex items-center justify-center p-1" title={p.name}>
-                                                {p.decorFrame === "crown" && (
-                                                  <span className="decor-crown-badge !text-[6px] !top-[-4.5px]">👑</span>
-                                                )}
-                                                <div
-                                                  className="w-[18px] h-[18px] rounded-full flex items-center justify-center text-[7.5px] font-black text-white shadow-md border border-black/30 relative animate-fade-in"
-                                                  style={{ backgroundColor: p.color }}
-                                                >
-                                                  {p.name.charAt(0).toUpperCase()}
-                                                  
-                                                  {/* Frame micro ring overlays */}
-                                                  <AvatarFrame decorFrame={p.decorFrame} playerColor={p.color} />
-                                                  
-                                                  
-                                                </div>
-                                              </div>
-                                            ))
-                                          ) : (
-                                            <span className="text-[10px] text-zinc-500 font-medium font-sans">{t.noPlayers}</span>
+                                          {room.id.startsWith("private-") && (room.mode === "all" || !room.mode) && (
+                                            <span className="text-[8px] px-1.5 py-0.5 bg-emerald-500/15 text-emerald-400 rounded-md uppercase font-bold" title={language === "ru" ? "Для всех" : "Everyone"}>
+                                              🌍
+                                            </span>
                                           )}
                                         </div>
                                       </div>
 
-                                      {/* Connection actions */}
-                                      {isCurrent ? (
-                                        <span className="text-[10px] px-2.5 py-1.5 squircle-btn font-black uppercase bg-white/15 text-white/90 border-0 flex items-center gap-1 shrink-0 font-sans">
-                                          <Check className="w-3 h-3 text-emerald-400" />
-                                          {t.youAreHere}
-                                        </span>
-                                      ) : isFull ? (
-                                        <button
-                                          type="button"
-                                          disabled
-                                          className="px-3 py-1.5 bg-zinc-850 text-zinc-600 text-[10px] font-bold uppercase squircle-btn cursor-not-allowed shrink-0 border-0 font-sans"
-                                        >
-                                          {t.fullServer}
-                                        </button>
-                                      ) : (
-                                        <button
-                                          type="button"
-                                          onClick={() => handleTryJoinRoom(room)}
-                                          className="px-3.5 py-1.5 bg-white text-black hover:bg-neutral-200 text-[10px] font-bold uppercase squircle-btn border-0 tracking-wider active:scale-95 transition-all shrink-0 cursor-pointer font-sans"
-                                        >
-                                          {t.enterActionBtn}
-                                        </button>
-                                      )}
-                                    </div>
+                                      {/* Overlapping Player Avatars Row */}
+                                      <div className="flex -space-x-1.5 justify-center items-center h-8 select-none my-1">
+                                        {room.players && room.players.length > 0 ? (
+                                          room.players.map((p, pIdx) => (
+                                            <div
+                                              key={p.id || pIdx}
+                                              className="relative w-[26px] h-[26px] shrink-0 flex items-center justify-center transition-transform duration-150 hover:scale-125 hover:z-50"
+                                              title={p.name}
+                                              style={{ zIndex: pIdx + 5 }}
+                                            >
+                                              {p.decorFrame === "crown" && (
+                                                <span className="absolute text-[8px] top-[-7.5px] z-20 select-none pointer-events-none">👑</span>
+                                              )}
+                                              <div
+                                                className="w-[26px] h-[26px] rounded-full flex items-center justify-center text-[9px] font-black text-white shadow-md border border-neutral-900/40 relative animate-fade-in bg-cover bg-center"
+                                                style={{ 
+                                                  backgroundColor: p.color,
+                                                  backgroundImage: p.avatarUrl ? `url(${p.avatarUrl})` : "none"
+                                                }}
+                                              >
+                                                {!p.avatarUrl && p.name.charAt(0).toUpperCase()}
+                                                <AvatarFrame decorFrame={p.decorFrame} playerColor={p.color} />
+                                              </div>
+                                            </div>
+                                          ))
+                                        ) : (
+                                          <span className="text-[9px] text-zinc-500 font-bold uppercase tracking-wider font-sans py-1">
+                                            {t.noPlayers || "EMPTY"}
+                                          </span>
+                                        )}
+                                      </div>
+
+                                      {/* Button at bottom */}
+                                      <div className="w-full mt-1 shrink-0">
+                                        {isCurrent ? (
+                                          <span className="w-full py-1.5 flex items-center justify-center gap-1 text-[9px] font-black uppercase tracking-wider bg-white/10 text-white/70 squircle-btn border-0 font-sans select-none">
+                                            <Check className="w-3.5 h-3.5 text-white/70" />
+                                            {t.youAreHere}
+                                          </span>
+                                        ) : isFull ? (
+                                          <button
+                                            type="button"
+                                            disabled
+                                            className="w-full py-1.5 bg-zinc-800 text-zinc-600 text-[9px] font-bold uppercase squircle-btn border-0 font-sans cursor-not-allowed select-none"
+                                          >
+                                            {t.fullServer}
+                                          </button>
+                                        ) : (
+                                          <button
+                                            type="button"
+                                            onClick={() => handleTryJoinRoom(room)}
+                                            className="w-full py-1.5 bg-white text-black hover:bg-neutral-200 text-[9px] font-black uppercase squircle-btn border-0 tracking-wider shadow-sm transition active:scale-95 cursor-pointer font-sans"
+                                          >
+                                            {t.enterActionBtn}
+                                          </button>
+                                        )}
+                                      </div>
+                                    </motion.div>
                                   );
-                                });
+                                };
+
+                                return (
+                                  <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                                    {sortedRooms.map((room, index) => renderRoomCard(room, index))}
+                                  </div>
+                                );
                               })()}
                             </div>
                           </div>
@@ -2937,19 +3754,23 @@ export default function App() {
                     </div>
 
                     {/* Bottom Fixed action buttons: Exit and Continue */}
-                    <div className="shrink-0 flex flex-col gap-3 pt-4">
+                    <div className={`shrink-0 flex flex-col pt-3 ${(isMobileDevice || window.innerHeight < 550) ? "gap-2" : "gap-3"}`}>
                       <div className="flex gap-3">
                         <button
                           type="button"
                           onClick={saveProfileChanges}
-                          className="flex-1 py-3 bg-white text-black hover:bg-zinc-200 squircle-btn border-0 text-xs font-bold uppercase tracking-widest transition cursor-pointer flex items-center justify-center gap-1.5"
+                          className={`${
+                            (isMobileDevice || window.innerHeight < 550) ? "py-2 text-[10px]" : "py-3 text-xs"
+                          } flex-1 bg-white text-black hover:bg-zinc-200 squircle-btn border-0 font-bold uppercase tracking-widest transition cursor-pointer flex items-center justify-center gap-1.5`}
                         >
                           {t.continueBtn}
                         </button>
                         <button
                           type="button"
                           onClick={handleLeaveGame}
-                          className="flex-1 py-3 bg-red-500/10 hover:bg-red-500/20 text-red-400 font-bold squircle-btn border-0 text-xs tracking-wider uppercase transition-all cursor-pointer"
+                          className={`${
+                            (isMobileDevice || window.innerHeight < 550) ? "py-2 text-[10px]" : "py-3 text-xs"
+                          } flex-1 bg-red-500/10 hover:bg-red-500/20 text-red-400 font-bold squircle-btn border-0 tracking-wider uppercase transition-all cursor-pointer`}
                         >
                           {t.exitBtn}
                         </button>
@@ -2971,8 +3792,12 @@ export default function App() {
                 className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 font-sans pointer-events-auto overflow-y-auto"
               >
                 <div
-                  className="pointer-events-auto transition-all duration-[400ms] w-full max-w-sm flex items-center justify-center"
-                  style={isMobile ? undefined : { transform: `scale(${uiScale})`, transformOrigin: "center" }}
+                  className="pointer-events-auto w-full max-w-sm flex items-center justify-center"
+                  style={isMobile ? undefined : {
+                    transform: `scale(${uiScale})`,
+                    transformOrigin: "center",
+                    transition: "transform 400ms cubic-bezier(0.16, 1, 0.3, 1)"
+                  }}
                 >
                   <motion.div
                     initial={{ scale: 0.95, y: 15 }}
@@ -3018,7 +3843,7 @@ export default function App() {
                             className={`py-2.5 px-1.5 text-[10px] font-bold uppercase tracking-wider squircle-btn border-0 transition cursor-pointer ${
                               privacyMode === "only_me"
                                 ? "bg-red-500 text-white font-extrabold shadow-lg shadow-red-500/10"
-                                : "bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-white"
+                                : "bg-transparent text-zinc-400 hover:bg-white/10 hover:text-white"
                             }`}
                           >
                             {language === "ru" ? "Только я" : "Only Me"}
@@ -3029,7 +3854,7 @@ export default function App() {
                             className={`py-2.5 px-1.5 text-[10px] font-bold uppercase tracking-wider squircle-btn border-0 transition cursor-pointer ${
                               privacyMode === "friends"
                                 ? "bg-sky-500 text-white font-extrabold shadow-lg shadow-sky-500/10"
-                                : "bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-white"
+                                : "bg-transparent text-zinc-400 hover:bg-white/10 hover:text-white"
                             }`}
                           >
                             {language === "ru" ? "Друзья" : "Friends"}
@@ -3040,7 +3865,7 @@ export default function App() {
                             className={`py-2.5 px-1.5 text-[10px] font-bold uppercase tracking-wider squircle-btn border-0 transition cursor-pointer ${
                               privacyMode === "all"
                                 ? "bg-emerald-500 text-white font-extrabold shadow-lg shadow-emerald-500/10"
-                                : "bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-white"
+                                : "bg-transparent text-zinc-400 hover:bg-white/10 hover:text-white"
                             }`}
                           >
                             {language === "ru" ? "Для всех" : "Everyone"}
@@ -3126,8 +3951,12 @@ export default function App() {
           <AnimatePresence>
             {isScoreboardVisible && roomInfo && (
               <div
-                className="absolute top-5 right-5 z-10 pointer-events-none transition-all duration-[400ms]"
-                style={isMobile ? undefined : { transform: `scale(${uiScale})`, transformOrigin: "top right" }}
+                className="absolute top-5 right-5 z-10 pointer-events-none"
+                style={isMobile ? undefined : {
+                  transform: `scale(${uiScale})`,
+                  transformOrigin: "top right",
+                  transition: "transform 400ms cubic-bezier(0.16, 1, 0.3, 1)"
+                }}
               >
                 <motion.div
                   initial={{ opacity: 0, x: 40, scale: 0.95 }}
@@ -3295,18 +4124,35 @@ export default function App() {
           {/* Avatar Customizer / Shop Slide Panel */}
           <AnimatePresence>
             {isAvatarShopOpen && (
-              <motion.div
-                key="avatar-shop-panel"
-                initial={isMobile ? { y: "100%", opacity: 1 } : { x: "100%", opacity: 1 }}
-                animate={isMobile ? { y: 0, opacity: 1 } : { x: 0, opacity: 1 }}
-                exit={isMobile ? { y: "100%", opacity: 1 } : { x: "100%", opacity: 1 }}
-                transition={{ type: "tween", ease: "easeOut", duration: 0.25 }}
-                className={`fixed z-40 bg-black/80 backdrop-blur-md flex flex-col shadow-2xl overflow-hidden font-sans ${
-                  isMobile
-                    ? "bottom-0 left-0 w-full h-[55%] border-t border-white/10 rounded-t-[28px]"
-                    : "top-0 right-0 h-full w-[440px] border-l border-white/5"
-                }`}
+              <div
+                className="fixed z-40 pointer-events-none top-0 right-0 h-screen"
+                style={isMobileDevice || window.innerHeight < 550 ? {
+                  top: 0,
+                  bottom: 0,
+                  right: 0,
+                  height: "100%",
+                  width: "350px",
+                  maxWidth: "80vw",
+                } : {
+                  top: 0,
+                  right: 0,
+                  width: "440px",
+                  height: `${100 / uiScale}vh`,
+                  transform: `scale(${uiScale})`,
+                  transformOrigin: "top right",
+                  transition: "transform 400ms cubic-bezier(0.16, 1, 0.3, 1)"
+                }}
               >
+                <motion.div
+                  key="avatar-shop-panel"
+                  initial={{ x: "100%", opacity: 0.5 }}
+                  animate={{ x: 0, opacity: 1 }}
+                  exit={{ x: "100%", opacity: 0.5 }}
+                  transition={{ type: "tween", ease: "easeOut", duration: 0.3 }}
+                  className={`w-full h-full bg-neutral-950/92 backdrop-blur-md flex flex-col shadow-2xl overflow-hidden font-sans border-l border-white/10 pointer-events-auto ${
+                    isMobileDevice || window.innerHeight < 550 ? "border-l border-white/20" : ""
+                  }`}
+                >
                 {/* Header Section */}
                 <div className="py-2.5 px-4 md:p-5 border-b border-white/5 flex items-center justify-between shrink-0 bg-transparent">
                   <div className="flex items-center gap-2.5">
@@ -3328,7 +4174,7 @@ export default function App() {
 
                   {/* Coin balance with + pill to buy */}
                   <div className="flex items-center gap-2">
-                    <div className="bg-white/10 pl-3 pr-2.5 py-1.5 rounded-full border border-white/20 flex items-center gap-2 shadow-[0_0_12px_rgba(255,255,255,0.08)] shrink-0 select-none">
+                    <div className="bg-white/10 pl-3 pr-2.5 py-1.5 rounded-full flex items-center gap-2 shrink-0 select-none">
                       <span className="text-white font-extrabold text-xs flex items-center gap-1">
                         <CoinIcon className="w-4 h-4 text-white" />
                         {coins}
@@ -3354,10 +4200,10 @@ export default function App() {
                     <button
                       key={tab.id}
                       onClick={() => setShopTab(tab.id)}
-                      className={`flex-1 py-1.5 text-center text-[10px] md:text-xs font-black uppercase tracking-wider transition squircle-panel cursor-pointer ${
+                      className={`flex-1 py-1.5 text-center text-[10px] md:text-xs font-black uppercase tracking-wider transition squircle-panel border-0 cursor-pointer ${
                         shopTab === tab.id
                           ? "bg-white text-black"
-                          : "bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-white"
+                          : "bg-transparent text-zinc-400 hover:bg-white/10 hover:text-white"
                       }`}
                     >
                       {tab.label}
@@ -3459,21 +4305,24 @@ export default function App() {
 
                   return (
                     <>
-                      <div className="flex-1 overflow-y-auto p-4 custom-scrollbar min-h-0 bg-transparent flex flex-col gap-3">
+                      <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 custom-scrollbar min-h-0 bg-transparent flex flex-col gap-3">
                         {shopTab === "skin" && (
                           <div className="flex flex-col gap-2.5">
                             <div className="grid grid-cols-2 gap-3.5 pb-4">
-                              {SKINS_CATALOG.map((s) => {
+                              {SKINS_CATALOG.map((s, sIdx) => {
                                 const isOwned = isSkinOwnedLocal(s.id);
                                 const isEquipped = equippedSkin === s.id;
                                 
                                 return (
                                   <motion.div 
                                     key={s.id}
+                                    initial={{ opacity: 0, y: 20 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    transition={{ delay: sIdx * 0.04, duration: 0.35, ease: "easeOut" }}
                                     whileHover={{ scale: 1.02 }}
                                     whileTap={{ scale: 0.98 }}
                                     onClick={() => setEquippedSkin(s.id)}
-                                    className="aspect-[10/13] w-full flex flex-col justify-between p-3.5 bg-zinc-900/50 hover:bg-zinc-900/70 relative transition duration-200 rounded-[24px] select-none cursor-pointer group shadow-lg"
+                                    className="aspect-[10/13] w-full flex flex-col justify-between p-3.5 bg-zinc-900/50 hover:bg-zinc-900/70 relative transition-colors duration-200 rounded-[24px] select-none cursor-pointer group shadow-lg"
                                   >
                                     {/* Favorite / Heart button */}
                                     <button
@@ -3558,17 +4407,20 @@ export default function App() {
                         {shopTab === "name" && (
                           <div className="flex flex-col gap-3">
                             <div className="grid grid-cols-2 gap-3 pb-3">
-                              {EFFECTS_CATALOG.map((e) => {
+                              {EFFECTS_CATALOG.map((e, eIdx) => {
                                 const isOwned = ownedEffects.includes(e.id);
                                 const isEquipped = equippedEffect === e.id;
                                 
                                 return (
                                   <motion.div 
                                     key={e.id}
+                                    initial={{ opacity: 0, y: 20 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    transition={{ delay: eIdx * 0.04, duration: 0.35, ease: "easeOut" }}
                                     whileHover={{ scale: 1.02 }}
                                     whileTap={{ scale: 0.98 }}
                                     onClick={() => setEquippedEffect(e.id)}
-                                    className="w-full flex flex-col justify-between p-3.5 bg-zinc-900/50 hover:bg-zinc-900/70 relative transition duration-200 rounded-[24px] select-none cursor-pointer group shadow-lg"
+                                    className="w-full flex flex-col justify-between p-3.5 bg-zinc-900/50 hover:bg-zinc-900/70 relative transition-colors duration-200 rounded-[24px] select-none cursor-pointer group shadow-lg"
                                   >
                                     {/* Favorite / Heart button */}
                                     <button
@@ -3679,17 +4531,20 @@ export default function App() {
                         {shopTab === "decor" && (
                           <div className="flex flex-col gap-2.5">
                             <div className="grid grid-cols-2 gap-3 pb-4">
-                              {DECOR_CATALOG.map((d) => {
+                              {DECOR_CATALOG.map((d, dIdx) => {
                                 const isOwned = isDecorOwnedLocal(d.id);
                                 const isEquipped = equippedDecorFrame === d.id;
                                 
                                 return (
                                   <motion.div 
                                     key={d.id}
+                                    initial={{ opacity: 0, y: 20 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    transition={{ delay: dIdx * 0.04, duration: 0.35, ease: "easeOut" }}
                                     whileHover={{ scale: 1.02 }}
                                     whileTap={{ scale: 0.98 }}
                                     onClick={() => setEquippedDecorFrame(d.id)}
-                                    className="w-full flex flex-col justify-between p-3.5 bg-zinc-900/50 hover:bg-zinc-900/70 relative transition duration-200 rounded-[24px] select-none cursor-pointer group shadow-lg"
+                                    className="w-full flex flex-col justify-between p-3.5 bg-zinc-900/50 hover:bg-zinc-900/70 relative transition-colors duration-200 rounded-[24px] select-none cursor-pointer group shadow-lg"
                                   >
                                     {/* Favorite / Heart button */}
                                     <button
@@ -3877,7 +4732,8 @@ export default function App() {
                     </>
                   );
                 })()}
-              </motion.div>
+                </motion.div>
+              </div>
             )}
           </AnimatePresence>
 
@@ -3892,8 +4748,12 @@ export default function App() {
                 className="fixed inset-0 z-[110] flex items-center justify-center bg-black/80 backdrop-blur-md p-4 select-none"
               >
                 <div 
-                  className="pointer-events-auto transition-all duration-[400ms] flex items-center justify-center"
-                  style={isMobile ? undefined : { transform: `scale(${uiScale})`, transformOrigin: "center" }}
+                  className="pointer-events-auto flex items-center justify-center"
+                  style={isMobile ? undefined : {
+                    transform: `scale(${uiScale})`,
+                    transformOrigin: "center",
+                    transition: "transform 400ms cubic-bezier(0.16, 1, 0.3, 1)"
+                  }}
                 >
                   <motion.div
                     initial={{ opacity: 0, scale: 0.95, y: 15 }}
@@ -4042,7 +4902,7 @@ export default function App() {
                     onClick={() => {
                       window.location.reload();
                     }}
-                    className="w-full py-3 bg-white hover:bg-zinc-200 text-black rounded-xl text-xs font-bold uppercase tracking-wider transition cursor-pointer shadow-md font-sans"
+                    className="w-full py-3 bg-white hover:bg-zinc-200 text-black rounded-xl text-xs font-bold uppercase tracking-wider transition cursor-pointer shadow-md font-sans border-0"
                   >
                     {language === "ru" ? "Переподключиться" : "Reconnect"}
                   </button>
@@ -4052,55 +4912,18 @@ export default function App() {
           </AnimatePresence>
 
           {/* Friend requests container */}
-          <div className="fixed bottom-6 right-6 z-[100] flex flex-col gap-3 w-[calc(100vw-3rem)] sm:w-[320px] max-w-full pointer-events-none select-none">
+          <div className="fixed bottom-6 right-6 z-[100] flex flex-col gap-3 w-[calc(100vw-3rem)] sm:w-[416px] max-w-full pointer-events-none select-none">
             <AnimatePresence>
               {incomingRequests.map((req) => (
-                <motion.div
+                <FriendRequestToast
                   key={req.senderId}
-                  initial={{ opacity: 0, y: 30, scale: 0.9 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: 15, scale: 0.95 }}
-                  className="bg-zinc-950/90 border border-white/10 p-3 rounded-2xl shadow-2xl flex items-center gap-3 backdrop-blur-md pointer-events-auto"
-                >
-                  <div className="relative shrink-0 flex items-center justify-center p-0.5">
-                    {req.senderDecorFrame === "crown" && (
-                      <span className="decor-crown-badge !text-[6px] !top-[-4px]">👑</span>
-                    )}
-                    <div 
-                      className="w-8 h-8 rounded-full flex items-center justify-center font-black text-xs select-none text-white relative shadow-inner animate-fade-in"
-                      style={{ backgroundColor: req.senderColor }}
-                    >
-                      {req.senderName.charAt(0).toUpperCase()}
-                      <AvatarFrame decorFrame={req.senderDecorFrame} playerColor={req.senderColor} />
-                    </div>
-                  </div>
-                  <div className="flex flex-col min-w-0 flex-1">
-                    <span className="text-[9px] text-indigo-400 font-extrabold uppercase font-mono leading-none tracking-wider select-none">
-                      {t.incomingFriendRequest}
-                    </span>
-                    <span className="text-xs text-white font-bold truncate mt-0.5 leading-tight">
-                      {req.senderName}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0 select-none">
-                    <button
-                      type="button"
-                      onClick={() => handleAcceptFriendRequest(req.senderId)}
-                      className="w-7 h-7 rounded-full bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600 hover:text-white flex items-center justify-center cursor-pointer border-0 transition-all active:scale-90"
-                      title={language === "ru" ? "Принять" : "Accept"}
-                    >
-                      <Check className="w-4 h-4 stroke-[3]" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDeclineFriendRequest(req.senderId)}
-                      className="w-7 h-7 rounded-full bg-red-600/20 text-red-400 hover:bg-red-600 hover:text-white flex items-center justify-center cursor-pointer border-0 transition-all active:scale-90"
-                      title={language === "ru" ? "Отклонить" : "Decline"}
-                    >
-                      <X className="w-4 h-4 stroke-[3]" />
-                    </button>
-                  </div>
-                </motion.div>
+                  req={req}
+                  onAccept={handleAcceptFriendRequest}
+                  onDecline={handleDeclineFriendRequest}
+                  onTimeout={handleTimeoutFriendRequest}
+                  language={language}
+                  t={t}
+                />
               ))}
             </AnimatePresence>
           </div>
@@ -4109,180 +4932,298 @@ export default function App() {
       )}
 
       {/* Immersive Beautiful Connection & Loading Screen Overlay */}
-      <AnimatePresence>
+      <AnimatePresence onExitComplete={() => setIsOverlayFullyGone(true)}>
         {showOverlayActual && (
           <motion.div
             key={errorMsg ? "error" : "connecting_screen"}
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.55, ease: "easeInOut" }}
-            className="fixed inset-0 z-50 flex flex-col items-center justify-center p-4 font-sans select-none overflow-hidden bg-black"
+            exit={{ opacity: 0, scale: 1.06 }}
+            transition={{ duration: 0.58, ease: [0.16, 1, 0.3, 1] }}
+            className="fixed inset-0 z-50 flex flex-col items-center justify-center p-4 font-sans select-none overflow-hidden bg-[#06070a]"
           >
-            {/* Custom candy cane CSS sliding animations */}
-            <style>{`
-              @keyframes candy-cane-slide {
-                from { background-position: 0 0; }
-                to { background-position: 1.5rem 0; }
-              }
-              .candy-cane-bar {
-                background-color: #ffffff !important;
-                background-image: linear-gradient(
-                  45deg,
-                  rgba(0, 0, 0, 0.15) 25%,
-                  transparent 25%,
-                  transparent 50%,
-                  rgba(0, 0, 0, 0.15) 50%,
-                  rgba(0, 0, 0, 0.15) 75%,
-                  transparent 75%,
-                  transparent
-                ) !important;
-                background-size: 1.5rem 1.5rem !important;
-                animation: candy-cane-slide 1s linear infinite !important;
-              }
-            `}</style>
-
-            {/* Immersive fullscreen background blur and darken of Cover.jpg */}
-            <div className="absolute inset-0 z-0 pointer-events-none">
+            {/* Immersive fullscreen background layer with 20% blurred cover */}
+            <div className="absolute inset-0 z-0 pointer-events-none select-none overflow-hidden">
               <img 
                 src={coverJpgUrl} 
-                alt="Background blurred cover" 
+                alt="Fullscreen background cover" 
                 referrerPolicy="no-referrer"
                 onError={(e) => {
                   e.currentTarget.src = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=640&auto=format&fit=crop";
                 }}
-                className="w-full h-full object-cover filter blur-lg scale-110 opacity-65 select-none"
+                className="w-full h-full object-cover opacity-20 filter blur-md scale-105"
               />
-              <div className="absolute inset-0 bg-[#06070a]/40" />
+              <div className="absolute inset-0 bg-black/10" />
             </div>
 
-            {/* Centered clean Cover Image & Game Info (No panel background) */}
-            <div 
-              className="flex flex-col gap-5 w-full max-w-sm md:max-w-md z-10 relative pointer-events-auto"
-              style={isMobile ? undefined : { transform: `scale(${uiScale})`, transformOrigin: 'center' }}
-            >
-              {/* 16:9 Game Cover Artwork (Cover Image) - Crisp, bright, fully visible without panel */}
-              <div className="w-full aspect-[16/9] relative squircle-panel overflow-hidden border border-white/10 group bg-neutral-900">
-                <img 
-                  src={coverJpgUrl} 
-                  alt="Game Cover" 
-                  referrerPolicy="no-referrer"
-                  onError={(e) => {
-                    // Fallback to a stunning cyberpunk neon scene if Cover.jpg is empty/unreadable
-                    e.currentTarget.src = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=640&auto=format&fit=crop";
-                  }}
-                  className="absolute inset-0 w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-700 select-none pointer-events-none" 
-                />
+            {/* Centered clean Cover Image & Game Info (No panel background) with beautiful custom entry and dissolving exit animations */}
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 overflow-hidden">
+              <div 
+                className="pointer-events-auto shrink-0"
+                style={{
+                  width: "856px",
+                  height: "571px",
+                  transform: `scale(${uiScale})`,
+                  transformOrigin: "center",
+                  transition: "transform 400ms cubic-bezier(0.16, 1, 0.3, 1)"
+                }}
+              >
+                <motion.div 
+                  initial={{ opacity: 0, scale: 0.97 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 1.06 }}
+                  transition={{ duration: 0.52, ease: [0.16, 1, 0.3, 1] }}
+                  className="w-full h-full relative select-none cursor-default"
+                >
+              {/* SQUIRCLE rounded semi-transparent deep black backdrop box overlay - rendered FIRST and set to z-0 so it resides perfectly behind the SVG notch and text layers (1.5x rounded curve) */}
+              <div 
+                className="absolute left-[23.13%] top-[49.38%] w-[53.74%] h-[21.89%] bg-black/42 backdrop-blur-md border border-white/5 squircle-panel-strong pointer-events-none z-0 shadow-2xl"
+              />
+
+              <div 
+                className="w-full h-full relative z-10"
+              >
+                <svg
+                  viewBox="0 0 856 571"
+                  className="w-full h-full drop-shadow-3xl pointer-events-none"
+                  fill="none"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <g clipPath="url(#clip0_2_2)">
+                    {/* Transparent background so the fullscreen cover background bleeds through nicely */}
+                    <rect width="856" height="571" fill="none" />
+
+                    {/* The white outer notch path of the cover container */}
+                    <path
+                      d="M268 175C268 161.801 268 155.201 272.101 151.101C276.201 147 282.801 147 296 147H559C572.199 147 578.799 147 582.899 151.101C587 155.201 587 161.801 587 175V322.137C587 335.203 587 341.736 582.975 345.823C582.925 345.874 582.874 345.925 582.823 345.975C578.736 350 572.203 350 559.137 350H547.543C541.501 350 536.243 345.869 534.812 340C533.382 334.131 528.124 330 522.082 330H427.5H332.918C326.876 330 321.618 334.131 320.188 340C318.757 345.869 313.499 350 307.457 350H295.863C282.797 350 276.264 350 272.177 345.975C272.126 345.925 272.075 345.874 272.025 345.823C268 341.736 268 335.203 268 322.137V175Z"
+                      fill="#ffffff"
+                    />
+
+                    {/* Clip path inside cover path to render the Cover image perfectly inside the notched boundaries of Figma */}
+                    <g clipPath="url(#coverClipShape)">
+                      {/* Cover image rendered beautifully inside the card path */}
+                      <image
+                        href={coverJpgUrl}
+                        x="264"
+                        y="143"
+                        width="327"
+                        height="211"
+                        preserveAspectRatio="xMidYMid slice"
+                      />
+
+                      {/* Cover shading gradient overlay */}
+                      <rect x="264" y="143" width="327" height="211" fill="url(#coverImageGrad)" />
+
+                      {/* High-fidelity shimmering gloss diagonal glare sweep overlay (active only when connecting, covering perfectly across the exact image path without offset gaps) */}
+                      {connecting && (
+                        <rect x="268" y="147" width="319" height="203" fill="url(#shimmerGrad)" style={{ mixBlendMode: 'overlay' }} />
+                      )}
+                    </g>
+
+                    {/* Real Text replace for vector "POOLROOMS [NEW]" inside the notched bottom layout / font normalized with var(--font-sans) */}
+                    <text
+                      x="427.5"
+                      y="348"
+                      dominantBaseline="central"
+                      textAnchor="middle"
+                      fill="#ffffff"
+                      fontSize="14"
+                      fontWeight="900"
+                      letterSpacing="0.12em"
+                      style={{ fontFamily: 'var(--font-sans), sans-serif' }}
+                    >
+                      POOLROOMS [NEW]
+                    </text>
+                  </g>
+
+                  {/* Filter & Clip & Gradient Declarations exactly according to the template figma specifications */}
+                  <defs>
+                    <clipPath id="clip0_2_2">
+                      <rect width="856" height="571" fill="white" />
+                    </clipPath>
+                    <clipPath id="coverClipShape">
+                      <path d="M268 175C268 161.801 268 155.201 272.101 151.101C276.201 147 282.801 147 296 147H559C572.199 147 578.799 147 582.899 151.101C587 155.201 587 161.801 587 175V322.137C587 335.203 587 341.736 582.975 345.823C582.925 345.874 582.874 345.925 582.823 345.975C578.736 350 572.203 350 559.137 350H547.543C541.501 350 536.243 345.869 534.812 340C533.382 334.131 528.124 330 522.082 330H427.5H332.918C326.876 330 321.618 334.131 320.188 340C318.757 345.869 313.499 350 307.457 350H295.863C282.797 350 276.264 350 272.177 345.975C272.126 345.925 272.075 345.874 272.025 345.823C268 341.736 268 335.203 268 322.137V175Z" />
+                    </clipPath>
+                    <linearGradient id="coverImageGrad" x1="0" y1="1" x2="0" y2="0">
+                      <stop offset="0%" stopColor="black" stopOpacity="0.4" />
+                      <stop offset="40%" stopColor="black" stopOpacity="0.08" />
+                      <stop offset="100%" stopColor="black" stopOpacity="0" />
+                    </linearGradient>
+                    <linearGradient id="shimmerGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stopColor="#ffffff" stopOpacity="0" />
+                      <stop offset="15%" stopColor="#ffffff" stopOpacity="0" />
+                      <stop offset="50%" stopColor="#ffffff" stopOpacity="0.45" />
+                      <stop offset="85%" stopColor="#ffffff" stopOpacity="0" />
+                      <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
+                      <animate attributeName="x1" from="-100%" to="100%" dur="1.6s" repeatCount="indefinite" />
+                      <animate attributeName="y1" from="-100%" to="100%" dur="1.6s" repeatCount="indefinite" />
+                      <animate attributeName="x2" from="0%" to="200%" dur="1.6s" repeatCount="indefinite" />
+                      <animate attributeName="y2" from="0%" to="200%" dur="1.6s" repeatCount="indefinite" />
+                    </linearGradient>
+                  </defs>
+                </svg>
               </div>
 
-              {/* Game branding & title left-aligned below the cover image */}
-              <div className="flex flex-col gap-1 text-left px-1">
-                <h1 className="text-3xl font-extrabold tracking-wider text-white uppercase select-none font-sans">
-                  {language === "ru" ? "Робо Арена" : "Robo Arena"}
-                </h1>
-                <p className="text-[11px] text-neutral-400 font-sans tracking-widest uppercase select-none font-semibold">
-                  {language === "ru" ? "СЕТЕВАЯ МУЛЬТИПЛЕЕРНАЯ ПЕСОЧНИЦА" : "ONLINE MULTIPLAYER SANDBOX"}
-                </p>
-              </div>
+              {/* Real HTML Interactive Button with Squircle styling (1.5x rounded curve) and Native Ripple Effect on click */}
+              <button
+                type="button"
+                onMouseDown={(e) => {
+                  if (inGame) return;
+                  if (e.type === "mousedown" && "button" in e && e.button !== 0) return;
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const x = e.clientX - rect.left;
+                  const y = e.clientY - rect.top;
+                  const size = Math.max(rect.width, rect.height) * 2.5;
+                  const newRipple = {
+                    id: Date.now() + Math.random(),
+                    x: x - size / 2,
+                    y: y - size / 2,
+                    size,
+                  };
+                  setOverlayBtnRipples((prev) => [...prev, newRipple]);
+                }}
+                onTouchStart={(e) => {
+                  if (inGame) return;
+                  if (e.touches && e.touches.length > 0) {
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const x = e.touches[0].clientX - rect.left;
+                    const y = e.touches[0].clientY - rect.top;
+                    const size = Math.max(rect.width, rect.height) * 2.5;
+                    const newRipple = {
+                      id: Date.now() + Math.random(),
+                      x: x - size / 2,
+                      y: y - size / 2,
+                      size,
+                    };
+                    setOverlayBtnRipples((prev) => [...prev, newRipple]);
+                  }
+                }}
+                onClick={() => {
+                  if (inGame) return;
+                  if (connecting) {
+                    handleCancelConnecting();
+                  } else {
+                    handlePlayButtonClick();
+                  }
+                }}
+                className={`absolute left-[34%] top-[66.7%] w-[32%] h-[8.93%] bg-white text-black font-sans font-extrabold uppercase text-xs md:text-xs tracking-[0.05em] whitespace-nowrap px-1 border-0 outline-none select-none z-20 shadow-xl overflow-hidden squircle-btn-strong flex items-center justify-center ${
+                  inGame 
+                    ? "pointer-events-none opacity-90 cursor-default" 
+                    : "cursor-pointer transition-all active:scale-[0.96] hover:bg-zinc-100"
+                }`}
+              >
+                {inGame 
+                  ? (language === "ru" ? "ЗАГРУЗКА..." : "LOADING...") 
+                  : (connecting ? (language === "ru" ? "ОТМЕНА" : "CANCEL") : (language === "ru" ? "ИГРАТЬ" : "PLAY"))}
+                {overlayBtnRipples.map((ripple) => (
+                  <span
+                    key={ripple.id}
+                    className="absolute rounded-full pointer-events-none bg-black/15"
+                    style={{
+                      left: ripple.x,
+                      top: ripple.y,
+                      width: ripple.size,
+                      height: ripple.size,
+                      animation: "global-ripple-anim 1600ms cubic-bezier(0.1, 0.8, 0.3, 1) forwards"
+                    }}
+                    onAnimationEnd={() => {
+                      setOverlayBtnRipples((prev) => prev.filter((r) => r.id !== ripple.id));
+                    }}
+                  />
+                ))}
+              </button>
 
-              {/* Action/Error handlers right underneath */}
-              <div className="w-full mt-1">
-                {errorMsg ? (
-                  /* Error block */
-                  <div className="flex flex-col items-start gap-4 py-1 w-full animate-fade-in">
-                    <div className="flex items-center gap-2 text-red-500">
-                      <Terminal className="w-5 h-5 animate-pulse" />
-                      <span className="text-xs font-bold uppercase tracking-widest font-mono">
-                        {language === "ru" ? "Ошибка подключения" : "Connection Failure"}
-                      </span>
+              {/* Yandex SDK auth warning shown underneath neatly, keeping main card untouched */}
+              {sdkAuthWarning && (
+                <div className="bg-yellow-500/10 border border-yellow-500/20 text-yellow-500 p-4 rounded-2xl flex flex-col items-center justify-between gap-3 text-xs font-semibold backdrop-blur-md animate-pulse-subtle w-full max-w-sm mt-1">
+                  <div className="flex items-center gap-2">
+                    <AlertCircle className="w-5 h-5 shrink-0 text-yellow-500 animate-pulse" />
+                    <span className="text-left font-sans">{sdkAuthWarning}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const loggedUser = await platformSdk.login();
+                      if (loggedUser) {
+                        setProfName(loggedUser.name);
+                        if (loggedUser.avatarUrl) {
+                          setSdkAvatarUrl(loggedUser.avatarUrl);
+                        }
+                        const keysToLoad = [
+                          "avatar_coins", "owned_skins", "owned_trails", "owned_effects",
+                          "owned_decor_frames", "eq_skin", "eq_trail", "eq_effect", "eq_decor"
+                        ];
+                        const loadedSaveData = await platformSdk.loadData(keysToLoad);
+                        if (loadedSaveData) {
+                          if (loadedSaveData.avatar_coins !== undefined) setCoins(Number(loadedSaveData.avatar_coins));
+                          if (loadedSaveData.owned_skins) setOwnedSkins(loadedSaveData.owned_skins);
+                          if (loadedSaveData.owned_trails) setOwnedTrails(loadedSaveData.owned_trails);
+                          if (loadedSaveData.owned_effects) setOwnedEffects(loadedSaveData.owned_effects);
+                          if (loadedSaveData.owned_decor_frames) setOwnedDecorFrames(loadedSaveData.owned_decor_frames);
+                          
+                          const loadedSkins = loadedSaveData.owned_skins || ["default"];
+                          const loadedTrails = loadedSaveData.owned_trails || ["none"];
+                          const loadedEffects = loadedSaveData.owned_effects || ["none"];
+                          const loadedDecor = loadedSaveData.owned_decor_frames || ["none"];
+
+                          if (loadedSaveData.eq_skin) {
+                            const isOwned = loadedSaveData.eq_skin === "default" || loadedSaveData.eq_skin === "Avatar_1.png" || loadedSkins.includes(loadedSaveData.eq_skin);
+                            setEquippedSkin(isOwned ? loadedSaveData.eq_skin : "default");
+                          }
+                          if (loadedSaveData.eq_trail) {
+                            const isOwned = loadedSaveData.eq_trail === "none" || loadedTrails.includes(loadedSaveData.eq_trail);
+                            setEquippedTrail(isOwned ? loadedSaveData.eq_trail : "none");
+                          }
+                          if (loadedSaveData.eq_effect) {
+                            const isOwned = loadedSaveData.eq_effect === "none" || loadedEffects.includes(loadedSaveData.eq_effect);
+                            setEquippedEffect(isOwned ? loadedSaveData.eq_effect : "none");
+                          }
+                          if (loadedSaveData.eq_decor) {
+                            const isOwned = loadedSaveData.eq_decor === "none" || loadedDecor.includes(loadedSaveData.eq_decor);
+                            setEquippedDecorFrame(isOwned ? loadedSaveData.eq_decor : "none");
+                          }
+                        }
+                      }
+                    }}
+                    className="w-full py-2.5 bg-yellow-500 hover:bg-yellow-600 active:scale-95 text-black font-extrabold rounded-xl uppercase tracking-widest text-[10.5px] border-0 transition-all cursor-pointer"
+                  >
+                    {language === "ru" ? "ВОЙТИ В АККАУНТ YANDEX" : "SIGN IN TO YANDEX ACCOUNT"}
+                  </button>
+                </div>
+              )}
+            </motion.div>
+          </div>
+        </div>
+
+            {/* Absolute Centered Modal for Connection Error (Matching chat box style, squircle, no border, deep backdrop blur) */}
+            <AnimatePresence>
+              {errorMsg && (
+                <div className="absolute inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+                  <motion.div
+                    initial={{ scale: 0.95, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    exit={{ scale: 0.95, opacity: 0 }}
+                    className="w-[325px] p-6 bg-neutral-950/92 backdrop-blur-md text-white shadow-2xl squircle-panel flex flex-col items-center gap-4 text-center select-none"
+                  >
+                    <div className="w-12 h-12 rounded-full bg-red-500/10 flex items-center justify-center text-red-500 mb-1">
+                      <Terminal className="w-6 h-6 animate-pulse" />
                     </div>
-                    <span className="text-xs text-neutral-400 text-left leading-relaxed font-sans px-1">
-                      {errorMsg}
-                    </span>
+                    <h3 className="text-base font-bold tracking-wide font-sans">
+                      {language === "ru" ? "Ошибка подключения" : "Connection Failure"}
+                    </h3>
                     <button
                       onClick={() => {
                         setErrorMsg(null);
                         window.location.reload();
                       }}
-                      className="w-full mt-1.5 py-4 bg-white hover:bg-neutral-200 active:scale-95 text-xs font-bold text-black squircle-btn border-0 transition-all duration-200 uppercase tracking-widest cursor-pointer font-sans text-center shadow-lg"
+                      className="w-52 mt-2 py-3 bg-white hover:bg-neutral-200 active:scale-95 text-black font-bold text-[13px] squircle-panel border-0 tracking-wide transition-all duration-200 cursor-pointer font-sans text-center shadow-lg"
                     >
-                      {t.retryConnect}
+                      {language === "ru" ? "Переподключиться" : "Reconnect"}
                     </button>
-                  </div>
-                ) : (!connecting && !inGame) && (
-                  /* Lobby / Fallback Play control button */
-                  <div className="flex flex-col gap-3.5 py-1 w-full">
-                    <button
-                      onClick={handlePlayButtonClick}
-                      className="w-full py-4 bg-white hover:bg-neutral-200 active:scale-[0.98] text-black font-black text-xs squircle-btn border-0 tracking-widest transition-all duration-200 cursor-pointer font-sans uppercase text-center shadow-lg"
-                    >
-                      {language === "ru" ? "ИГРАТЬ" : "PLAY GAME"}
-                    </button>
-
-                    {sdkAuthWarning && (
-                      <div className="bg-yellow-500/10 border border-yellow-500/20 text-yellow-500 p-4 rounded-2xl flex flex-col items-center justify-between gap-3 text-xs font-semibold backdrop-blur-md animate-pulse-subtle">
-                        <div className="flex items-center gap-2">
-                          <AlertCircle className="w-5 h-5 shrink-0 text-yellow-500 animate-pulse" />
-                          <span className="text-left font-sans">{sdkAuthWarning}</span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            const loggedUser = await platformSdk.login();
-                            if (loggedUser) {
-                              setProfName(loggedUser.name);
-                              if (loggedUser.avatarUrl) {
-                                setSdkAvatarUrl(loggedUser.avatarUrl);
-                              }
-                              const keysToLoad = [
-                                "avatar_coins", "owned_skins", "owned_trails", "owned_effects",
-                                "owned_decor_frames", "eq_skin", "eq_trail", "eq_effect", "eq_decor"
-                              ];
-                              const loadedSaveData = await platformSdk.loadData(keysToLoad);
-                              if (loadedSaveData) {
-                                if (loadedSaveData.avatar_coins !== undefined) setCoins(Number(loadedSaveData.avatar_coins));
-                                if (loadedSaveData.owned_skins) setOwnedSkins(loadedSaveData.owned_skins);
-                                if (loadedSaveData.owned_trails) setOwnedTrails(loadedSaveData.owned_trails);
-                                if (loadedSaveData.owned_effects) setOwnedEffects(loadedSaveData.owned_effects);
-                                if (loadedSaveData.owned_decor_frames) setOwnedDecorFrames(loadedSaveData.owned_decor_frames);
-                                if (loadedSaveData.eq_skin) setEquippedSkin(loadedSaveData.eq_skin);
-                                if (loadedSaveData.eq_trail) setEquippedTrail(loadedSaveData.eq_trail);
-                                if (loadedSaveData.eq_effect) setEquippedEffect(loadedSaveData.eq_effect);
-                                if (loadedSaveData.eq_decor) setEquippedDecorFrame(loadedSaveData.eq_decor);
-                              }
-                            }
-                          }}
-                          className="w-full py-2.5 bg-yellow-500 hover:bg-yellow-600 active:scale-95 text-black font-extrabold rounded-xl uppercase tracking-widest text-[10.5px] border-0 transition-all cursor-pointer"
-                        >
-                          {language === "ru" ? "ВОЙТИ В АККАУНТ YANDEX" : "SIGN IN TO YANDEX ACCOUNT"}
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Spinner and active connecting status left-aligned above the bottom progress bar */}
-            {connecting && (
-              <div className="absolute bottom-6 left-6 md:left-8 flex items-center gap-3.5 z-40 pointer-events-none text-white/90">
-                <div className="w-4 h-4 border-2 border-white/10 border-t-white rounded-full animate-spin" />
-                <span className="text-[11px] font-bold tracking-widest uppercase font-sans select-none">
-                  {language === "ru" ? "ПОДКЛЮЧЕНИЕ..." : "CONNECTING..."}
-                </span>
-              </div>
-            )}
-
-            {/* Premium full-width white candy cane progress bar at the absolute bottom of page */}
-            {loadingProgress > 0 && (
-              <div className="absolute bottom-0 left-0 right-0 w-full h-2 bg-neutral-950/40 z-50 overflow-hidden pointer-events-none">
-                <motion.div 
-                  animate={{ width: `${loadingProgress}%` }}
-                  transition={{ duration: 0.15, ease: "easeOut" }}
-                  className="h-full bg-white candy-cane-bar shadow-[0_0_15px_rgba(255,255,255,0.7)]"
-                />
-              </div>
-            )}
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
           </motion.div>
         )}
       </AnimatePresence>

@@ -1,16 +1,23 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
+import { fileURLToPath } from 'url';
 import path from 'path';
 import { defineConfig } from 'vite';
 
+// Замена __dirname для корректной работы в ESM
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 export default defineConfig(() => {
   return {
-    // Включаем относительные пути для сборки
+    // 1. Делает все пути к ассетам (js, css, картинки) относительными
     base: './', 
+    
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        // Использование безопасного __dirname
+        '@': path.resolve(__dirname, './src'), // Обычно настраивают на './src', но если нужно на корень, оставьте '.'
       },
     },
     server: {

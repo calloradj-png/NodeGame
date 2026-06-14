@@ -49,8 +49,10 @@ export default function Scoreboard({
           return (
             <div
               key={player.id}
-              className={`flex items-center justify-between px-1.5 py-1 rounded-xl transition-all text-xs border border-transparent hover:bg-white/5 ${
-                isSelf ? "text-white" : "text-neutral-400"
+              className={`flex items-center justify-between px-2 py-1.5 rounded-xl transition-all duration-200 text-xs border-0 hover:bg-white/5 select-none ${
+                isSelf 
+                  ? "text-white bg-transparent" 
+                  : "text-neutral-400 hover:text-white"
               }`}
             >
               <div className="flex items-center gap-2 truncate pr-2 w-full">
@@ -60,12 +62,17 @@ export default function Scoreboard({
                 {/* Round Custom micro avatar */}
                 <div className="relative shrink-0 flex items-center justify-center p-1">
                   <div 
-                    className="w-4 h-4 rounded-full flex items-center justify-center font-black text-[7px] text-black select-none shrink-0 uppercase relative shadow-inner animate-fade-in leading-none"
-                    style={{ backgroundColor: player.color || "#ffffff" }}
+                    className="w-4 h-4 rounded-full flex items-center justify-center font-black text-[7px] text-black select-none shrink-0 uppercase relative shadow-inner animate-fade-in leading-none bg-cover bg-center"
+                    style={{ 
+                      backgroundColor: player.color || "#ffffff",
+                      backgroundImage: player.avatarUrl ? `url(${player.avatarUrl})` : "none"
+                    }}
                   >
-                    <span className="relative top-[0.5px] leading-none">
-                      {player.name ? player.name.charAt(0) : "?"}
-                    </span>
+                    {!player.avatarUrl && (
+                      <span className="relative top-[0.5px] leading-none text-zinc-950">
+                        {player.name ? player.name.charAt(0) : "?"}
+                      </span>
+                    )}
                     <AvatarFrame decorFrame={player.decorFrame} playerColor={player.color || "#ffffff"} />
                   </div>
                 </div>

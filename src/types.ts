@@ -15,6 +15,9 @@ export interface Player {
   particleTrail?: string;
   nameEffect?: string;
   decorFrame?: string;
+  avatarUrl?: string;
+  isDead?: boolean;
+  health?: number;
 }
 
 export interface Collectible {
@@ -31,6 +34,8 @@ export interface Room {
   name: string;
   players: Record<string, Player>;
   collectibles: Collectible[];
+  buttonIsPressed?: boolean;
+  buttonPressedUntil?: number;
 }
 
 export interface ChatMessage {
@@ -43,6 +48,7 @@ export interface ChatMessage {
   timestamp: string;
   playerNameEffect?: string;
   playerDecorFrame?: string;
+  playerAvatarUrl?: string;
   translatedText?: string;
   detectedLang?: string;
   showTranslated?: boolean;

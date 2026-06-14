@@ -1,10 +1,22 @@
 import React, { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { WebGPURenderer } from "three/webgpu";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { OutlinePass } from "three/addons/postprocessing/OutlinePass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { Player, ChatMessage } from "../types";
+import { encodeClientMove } from "../binaryProtocol";
 import { motion, AnimatePresence } from "motion/react";
 import AdaptiveUsername from "./AdaptiveUsername";
 import VerifiedBadge from "./VerifiedBadge";
+import ProximityPromptUI from "./ProximityPromptUI";
+import DynamicJoystick from "./DynamicJoystick";
+import { ClientScriptController } from "../game/ClientScriptController";
+import { GameLocalization } from "../game/GameLocalization";
+import CasualCoinsHUD from "./CasualCoinsHUD";
 
 const SCENE_CONFIG = {
   toneMapping: THREE.ACESFilmicToneMapping,
@@ -36,36 +48,309 @@ interface GameCanvasProps {
   ws: WebSocket | null;
   joystickRef?: React.RefObject<{ x: number; y: number } | null>;
   messages: ChatMessage[];
-  graphicsQuality?: number; // 1 = Low, 2 = Medium, 3 = High, 4 = Ultra
+  graphicsQuality?: number; // 1 = Low (old Medium), 2 = Medium (old High), 3 = High (old Ultra)
   avatarShopOpen?: boolean;
+  editingProfile?: boolean;
   avatars?: Array<{ name?: string; name_en?: string; name_ru?: string; cost: number; path: string; flags: string }>;
+  avatarsTimestamp?: number;
   uiScale?: number;
+  showHitboxes?: boolean;
+  isChatVisible?: boolean;
+  coins: number;
+  onAddCoins: () => void;
+  language: "ru" | "en";
+  onOpenShop?: () => void;
+  onOpenGift?: () => void;
 }
 
-const PLAYER_RADIUS = 0.8;
+interface WorldTriangle {
+  a: THREE.Vector3;
+  b: THREE.Vector3;
+  c: THREE.Vector3;
+  normal: THREE.Vector3;
+  min: THREE.Vector3;
+  max: THREE.Vector3;
+  isFloor: boolean;
+}
 
-export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messages, graphicsQuality = 3, avatarShopOpen = false, avatars, uiScale = 1 }: GameCanvasProps) {
+function getClosestPointOnTriangle(p: THREE.Vector3, a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3, out: THREE.Vector3) {
+  const ab = new THREE.Vector3().subVectors(b, a);
+  const ac = new THREE.Vector3().subVectors(c, a);
+  const ap = new THREE.Vector3().subVectors(p, a);
+  const d1 = ab.dot(ap);
+  const d2 = ac.dot(ap);
+  if (d1 <= 0 && d2 <= 0) {
+    out.copy(a);
+    return;
+  }
+
+  const bp = new THREE.Vector3().subVectors(p, b);
+  const d3 = ab.dot(bp);
+  const d4 = ac.dot(bp);
+  if (d3 >= 0 && d4 <= d3) {
+    out.copy(b);
+    return;
+  }
+
+  const vc = d1 * d4 - d3 * d2;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+    const v = d1 / (d1 - d3);
+    out.copy(a).addScaledVector(ab, v);
+    return;
+  }
+
+  const cp = new THREE.Vector3().subVectors(p, c);
+  const d5 = ab.dot(cp);
+  const d6 = ac.dot(cp);
+  if (d6 >= 0 && d5 <= d6) {
+    out.copy(c);
+    return;
+  }
+
+  const vb = d5 * d2 - d1 * d6;
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+    const w = d2 / (d2 - d6);
+    out.copy(a).addScaledVector(ac, w);
+    return;
+  }
+
+  const va = d3 * d6 - d5 * d4;
+  if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) {
+    const w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+    out.copy(b).addScaledVector(new THREE.Vector3().subVectors(c, b), w);
+    return;
+  }
+
+  const denom = 1.0 / (va + vb + vc);
+  const vScale = vb * denom;
+  const wScale = vc * denom;
+  out.copy(a).addScaledVector(ab, vScale).addScaledVector(ac, wScale);
+}
+
+function extractWorldTriangles(mesh: THREE.Mesh): WorldTriangle[] {
+  const triangles: WorldTriangle[] = [];
+  const geometry = mesh.geometry;
+  if (!geometry) return triangles;
+
+  mesh.updateMatrixWorld(true);
+  const matrix = mesh.matrixWorld;
+
+  const positionAttr = geometry.attributes.position;
+  if (!positionAttr) return triangles;
+
+  const indexAttr = geometry.index;
+
+  const getVertex = (idx: number, out: THREE.Vector3) => {
+    out.set(
+      positionAttr.getX(idx),
+      positionAttr.getY(idx),
+      positionAttr.getZ(idx)
+    );
+    out.applyMatrix4(matrix);
+  };
+
+  const numIndices = indexAttr ? indexAttr.count : positionAttr.count;
+
+  for (let i = 0; i < numIndices; i += 3) {
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const c = new THREE.Vector3();
+
+    if (indexAttr) {
+      if (i + 2 < indexAttr.count) {
+        getVertex(indexAttr.getX(i), a);
+        getVertex(indexAttr.getX(i + 1), b);
+        getVertex(indexAttr.getX(i + 2), c);
+      } else {
+        continue;
+      }
+    } else {
+      if (i + 2 < positionAttr.count) {
+        getVertex(i, a);
+        getVertex(i + 1, b);
+        getVertex(i + 2, c);
+      } else {
+        continue;
+      }
+    }
+
+    const edge1 = new THREE.Vector3().subVectors(b, a);
+    const edge2 = new THREE.Vector3().subVectors(c, a);
+    const normal = new THREE.Vector3().crossVectors(edge1, edge2).normalize();
+
+    const min = new THREE.Vector3(
+      Math.min(a.x, b.x, c.x),
+      Math.min(a.y, b.y, c.y),
+      Math.min(a.z, b.z, c.z)
+    );
+    const max = new THREE.Vector3(
+      Math.max(a.x, b.x, c.x),
+      Math.max(a.y, b.y, c.y),
+      Math.max(a.z, b.z, c.z)
+    );
+
+    const isFloor = normal.y > 0.5;
+
+    triangles.push({ a, b, c, normal, min, max, isFloor });
+  }
+
+  return triangles;
+}
+
+const PLAYER_RADIUS = 0.53;
+const CAPSULE_HEIGHT = 1.8;
+const CAPSULE_LENGTH = Math.max(0.1, CAPSULE_HEIGHT - 2 * PLAYER_RADIUS);
+const CAPSULE_CENTER_Y = (2 * PLAYER_RADIUS + CAPSULE_LENGTH) / 2;
+const STAND_RADIUS = 0.42; // Thinner foot radius for ground-standing/snapping to avoid snapping when leaning against boxes/walls
+
+function queryGroundHeight(x: number, y: number, z: number, mapTriangles: WorldTriangle[]): number {
+  let activeGroundY = -999.0;
+  const pQuery = new THREE.Vector3(x, y, z);
+  const closestPt = new THREE.Vector3();
+
+  for (let i = 0; i < mapTriangles.length; i++) {
+    const tri = mapTriangles[i];
+    if (!tri.isFloor) continue;
+
+    if (x < tri.min.x - STAND_RADIUS || x > tri.max.x + STAND_RADIUS ||
+        z < tri.min.z - STAND_RADIUS || z > tri.max.z + STAND_RADIUS) {
+      continue;
+    }
+
+    getClosestPointOnTriangle(pQuery, tri.a, tri.b, tri.c, closestPt);
+
+    const hDx = x - closestPt.x;
+    const hDz = z - closestPt.z;
+    if (hDx * hDx + hDz * hDz < STAND_RADIUS * STAND_RADIUS) {
+      if (closestPt.y <= y + 0.35) {
+        if (closestPt.y > activeGroundY) {
+          activeGroundY = closestPt.y;
+        }
+      }
+    }
+  }
+  return activeGroundY;
+}
+
+// Module-level GLTF cache so switching graphics settings (or re-rendering the ThreeJS viewport) 
+// is completely instantaneous and doesn't trigger asynchronous network re-downloads/flickering.
+interface GLTFCacheEntry {
+  scene: THREE.Group;
+  triangles: WorldTriangle[];
+  spawnLoc: THREE.Vector3 | null;
+}
+let mapGltfCache: GLTFCacheEntry | null = null;
+
+export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messages, graphicsQuality = 2, avatarShopOpen = false, editingProfile = false, avatars, avatarsTimestamp = 0, uiScale = 1, showHitboxes = false, isChatVisible = false, coins, onAddCoins, language, onOpenShop, onOpenGift }: GameCanvasProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  const uiScaleRef = useRef(uiScale);
+  useEffect(() => {
+    uiScaleRef.current = uiScale;
+  }, [uiScale]);
+
+  const getDynamicScaleVal = () => {
+    const isMobile = window.innerWidth <= 768;
+    if (isMobile) {
+      return Math.min(1.25, Math.max(0.72, window.innerWidth / 375));
+    }
+    return uiScaleRef.current;
+  };
 
   // Keep references to access inside the loop without re-running effects
   const playersStateRef = useRef<Record<string, Player>>(roomInfo.players);
   const playerIdRef = useRef<string>(playerId);
+
+  // Spawning and room-transition tracking to ensure players aren't teleported on graphics changes
+  const hasSpawnedRef = useRef(false);
+  const previousRoomIdRef = useRef<string>("");
+  useEffect(() => {
+    if (roomInfo.id !== previousRoomIdRef.current) {
+      previousRoomIdRef.current = roomInfo.id;
+      hasSpawnedRef.current = false;
+    }
+  }, [roomInfo.id]);
 
   const avatarShopOpenRef = useRef(avatarShopOpen);
   useEffect(() => {
     avatarShopOpenRef.current = avatarShopOpen;
   }, [avatarShopOpen]);
 
+  const editingProfileRef = useRef(editingProfile);
+  useEffect(() => {
+    editingProfileRef.current = editingProfile;
+  }, [editingProfile]);
+
   const avatarsRef = useRef(avatars);
   useEffect(() => {
     avatarsRef.current = avatars;
   }, [avatars]);
 
+  const avatarsTimestampRef = useRef(avatarsTimestamp);
+  useEffect(() => {
+    avatarsTimestampRef.current = avatarsTimestamp;
+  }, [avatarsTimestamp]);
+
+  const showHitboxesRef = useRef(showHitboxes);
+  useEffect(() => {
+    showHitboxesRef.current = showHitboxes;
+  }, [showHitboxes]);
+
+  const mobileJumpTriggered = useRef(false);
+
   // Active chat bubble tracking
   const [activeBubbles, setActiveBubbles] = useState<Array<ChatMessage & { createdAt: number }>>([]);
   const processedMessageIds = useRef<Set<string>>(new Set());
   const bubblePositionsRef = useRef<Record<string, { x: number; y: number }>>({});
+
+  // Roblox Proximity Prompt States & Refs
+  const [promptVis, setPromptVis] = useState(false);
+  const [promptProg, setPromptProg] = useState(0);
+  const [hasFlashlight, setHasFlashlight] = useState(false);
+
+  const promptVisRef = useRef(false);
+  const promptProgRef = useRef(0);
+  const hasFlashlightRef = useRef(false);
+  const promptPosRef = useRef<{ x: number; y: number } | null>(null);
+  const mobilePromptHeldRef = useRef(false);
+
+  const mouseX = useRef(0);
+  const mouseY = useRef(0);
+  const smoothMouseX = useRef(0);
+  const smoothMouseY = useRef(0);
+
+  // Interactive Button refs & state mapping
+  const buttonMeshRef = useRef<THREE.Mesh | null>(null);
+  const initialButtonYRef = useRef<number>(0);
+  const buttonPressedStateRef = useRef<boolean>(false);
+  const buttonPressedUntilRef = useRef<number>(0);
+  const promptTriggeredRef = useRef<boolean>(false);
+
+  // Custom script-driven UI injection state
+  const [customUIElements, setCustomUIElements] = useState<Record<string, React.ReactNode>>({});
+  const scriptControllerRef = useRef<ClientScriptController | null>(null);
+
+  // Dynamic graphics quality refs
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const bloomPassRef = useRef<any | null>(null);
+  const sunLightRef = useRef<THREE.DirectionalLight | null>(null);
+  const ambientLightRef = useRef<THREE.AmbientLight | null>(null);
+
+  useEffect(() => {
+    const maxPixelRatio = graphicsQuality === 1 ? 1.2 : (graphicsQuality === 2 ? 1.8 : 2.2);
+    if (rendererRef.current) {
+      rendererRef.current.setPixelRatio(Math.min(window.devicePixelRatio, maxPixelRatio));
+    }
+    if (sunLightRef.current) {
+      sunLightRef.current.castShadow = graphicsQuality > 1;
+    }
+    if (bloomPassRef.current) {
+      bloomPassRef.current.enabled = graphicsQuality > 1;
+    }
+  }, [graphicsQuality]);
+
+
 
   useEffect(() => {
     if (!messages) return;
@@ -103,6 +388,7 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
   const playerPos = useRef<THREE.Vector3>(new THREE.Vector3(0, 0, 0));
   const playerVel = useRef<THREE.Vector3>(new THREE.Vector3(0, 0, 0));
   const playerRotY = useRef<number>(0);
+  const cameraLook = useRef<THREE.Vector3>(new THREE.Vector3(0, 0, 0));
 
   // Keyboard state
   const keysPressed = useRef<Record<string, boolean>>({});
@@ -116,7 +402,13 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
     if (me && playerPos.current.lengthSq() === 0) {
       playerPos.current.set(me.x, me.y, me.z);
     }
-  }, [roomInfo.players, playerId]);
+
+    // Sync room-level button state if provided
+    if ("buttonIsPressed" in roomInfo) {
+      buttonPressedStateRef.current = !!(roomInfo as any).buttonIsPressed;
+      buttonPressedUntilRef.current = (roomInfo as any).buttonPressedUntil || 0;
+    }
+  }, [roomInfo, playerId]);
 
   useEffect(() => {
     playerIdRef.current = playerId;
@@ -134,6 +426,238 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
     // Soft preset background and fog matching your custom atmosphere
     scene.background = new THREE.Color(SCENE_CONFIG.fogColor);
     scene.fog = new THREE.FogExp2(SCENE_CONFIG.fogColor, SCENE_CONFIG.fogDensity);
+
+    // Group to hold all static debug hitboxes & player collider
+    const debugGroup = new THREE.Group();
+    scene.add(debugGroup);
+
+    // Dynamic physical balls caches and states for server-controlled obstacles
+    const ballGeometry = new THREE.SphereGeometry(1, 16, 16);
+    const ballMeshes = new Map<string, THREE.Object3D>();
+    const ballStates = new Map<string, {
+      id: string;
+      x: number;
+      y: number;
+      z: number;
+      radius: number;
+      startX: number;
+      startY: number;
+      startZ: number;
+      targetX: number;
+      targetY: number;
+      targetZ: number;
+      color: string;
+      lerpTime: number;
+    }>();
+
+    let cameraShakeIntensity = 0;
+    let cameraShakeTime = 0;
+
+    const handleWsEvent = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail && detail.type === "bomb_exploded_fx") {
+        cameraShakeIntensity = 1.6; // High, rapid, smooth shake
+        cameraShakeTime = 0;
+      }
+    };
+
+    const handleButtonStateChange = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail) {
+        buttonPressedStateRef.current = !!detail.isPressed;
+        buttonPressedUntilRef.current = detail.pressedUntil || 0;
+      }
+    };
+
+    const handlePhysicsSync = (e: Event) => {
+      const bodies = (e as CustomEvent).detail as any[];
+      if (!Array.isArray(bodies)) return;
+
+      const receivedIds = new Set<string>();
+
+      bodies.forEach(body => {
+        receivedIds.add(body.id);
+
+        let state = ballStates.get(body.id);
+        if (!state) {
+          state = {
+            id: body.id,
+            x: body.x,
+            y: body.y,
+            z: body.z,
+            radius: body.radius,
+            startX: body.x,
+            startY: body.y,
+            startZ: body.z,
+            targetX: body.x,
+            targetY: body.y,
+            targetZ: body.z,
+            color: body.color || "#ffffff",
+            lerpTime: 1
+          };
+          ballStates.set(body.id, state);
+        } else {
+          // Slide old extrapolated targets into start positions
+          state.startX = state.x;
+          state.startY = state.y;
+          state.startZ = state.z;
+          state.targetX = body.x;
+          state.targetY = body.y;
+          state.targetZ = body.z;
+          state.radius = body.radius;
+          state.color = body.color || state.color;
+          state.lerpTime = 0; // reset lerp to slide over next 100ms
+        }
+
+        // Add 3D representation if absent
+        if (!ballMeshes.has(body.id)) {
+          let mesh: THREE.Object3D;
+          if (body.replicatedType === "bomb" && (window as any).cachedBombMesh) {
+            // Clone the beautiful pre-configured Bomb object from our cache
+            const bombClone = (window as any).cachedBombMesh.clone();
+            bombClone.visible = true;
+            mesh = bombClone;
+          } else {
+            const ballMat = new THREE.MeshStandardMaterial({
+              color: new THREE.Color(state.color),
+              roughness: 0.15,
+              metalness: 0.15,
+              envMapIntensity: 1.5,
+            });
+            const sMesh = new THREE.Mesh(ballGeometry, ballMat);
+            sMesh.castShadow = true;
+            sMesh.receiveShadow = true;
+            sMesh.scale.setScalar(state.radius);
+            mesh = sMesh;
+          }
+          mesh.position.set(state.x, state.y, state.z);
+
+          // Add a wireframe sphere for the ball's hitbox
+          const wireframeGeo = new THREE.SphereGeometry(1.005, 12, 12);
+          const wireframeMat = new THREE.MeshBasicMaterial({
+            color: 0x00ffff, // distinct cyan color
+            wireframe: true,
+            transparent: true,
+            opacity: 0.8,
+            depthTest: false,
+            depthWrite: false
+          });
+          const wireframeMesh = new THREE.Mesh(wireframeGeo, wireframeMat);
+          wireframeMesh.name = "hitboxWireframe";
+          wireframeMesh.visible = showHitboxesRef.current;
+          if (body.id.startsWith("bomb")) {
+            wireframeMesh.scale.setScalar(0.5); // scales child wireframe down to representing actual 1.0x physics radius
+          }
+          mesh.add(wireframeMesh);
+
+          scene.add(mesh);
+          ballMeshes.set(body.id, mesh);
+        }
+      });
+
+      // Cleanup bodies that are no longer replicated
+      ballMeshes.forEach((mesh, id) => {
+        if (!receivedIds.has(id)) {
+          scene.remove(mesh);
+          const hitbox = mesh.getObjectByName("hitboxWireframe") as THREE.Mesh;
+          if (hitbox) {
+            hitbox.geometry.dispose();
+            if (Array.isArray(hitbox.material)) {
+              hitbox.material.forEach((m: any) => m.dispose());
+            } else {
+              hitbox.material.dispose();
+            }
+          }
+          if (mesh instanceof THREE.Mesh) {
+            if (mesh.geometry) mesh.geometry.dispose();
+            if (mesh.material) {
+              if (Array.isArray(mesh.material)) {
+                mesh.material.forEach((m: any) => m.dispose());
+              } else {
+                mesh.material.dispose();
+              }
+            }
+          } else {
+            // Traverse visual bomb groups and clean up their meshes' details
+            mesh.traverse((child) => {
+              if (child instanceof THREE.Mesh) {
+                if (child.geometry) child.geometry.dispose();
+                if (child.material) {
+                  if (Array.isArray(child.material)) {
+                    child.material.forEach((m: any) => m.dispose());
+                  } else {
+                    child.material.dispose();
+                  }
+                }
+              }
+            });
+          }
+          ballMeshes.delete(id);
+          ballStates.delete(id);
+        }
+      });
+    };
+
+    document.addEventListener("physics_sync", handlePhysicsSync as any);
+    document.addEventListener("button_state_changed", handleButtonStateChange as any);
+    document.addEventListener("ws_event", handleWsEvent as any);
+
+    // Build wireframe lines representing our custom high-fidelity floor and wall static colliders
+    const buildWireframeFromTriangles = (triangles: WorldTriangle[]) => {
+      const positions: number[] = [];
+      triangles.forEach(tri => {
+        positions.push(tri.a.x, tri.a.y, tri.a.z);
+        positions.push(tri.b.x, tri.b.y, tri.b.z);
+
+        positions.push(tri.b.x, tri.b.y, tri.b.z);
+        positions.push(tri.c.x, tri.c.y, tri.c.z);
+
+        positions.push(tri.c.x, tri.c.y, tri.c.z);
+        positions.push(tri.a.x, tri.a.y, tri.a.z);
+      });
+
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      const mat = new THREE.LineBasicMaterial({
+        color: 0xff3333,
+        depthWrite: false,
+        depthTest: true,
+        transparent: true,
+        opacity: 0.8
+      });
+      return new THREE.LineSegments(geom, mat);
+    };
+
+    // Load panoramic sky background (equirectangular sky dome)
+    let loadedSkyTexture: THREE.Texture | null = null;
+    const skyUrl = new URL("../assets/sprites/Sky.jpg", import.meta.url).href;
+    const skyTextureLoader = new THREE.TextureLoader();
+    skyTextureLoader.load(skyUrl, (texture) => {
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.mapping = THREE.EquirectangularReflectionMapping;
+      scene.background = texture;
+      scene.environment = texture; // Global reflection source for all materials!
+      loadedSkyTexture = texture;
+
+      // Automatically apply to any material in the scene that wants environment/reflection
+      scene.traverse((child) => {
+        if (child instanceof THREE.Mesh && child.material) {
+          // Skip the lasers so they don't reflect the sky texture, keeping them purely unshaded and red
+          if (child.name?.includes("laser") || child.userData?.isLaser) {
+            return;
+          }
+          const mats = Array.isArray(child.material) ? child.material : [child.material];
+          mats.forEach((mat) => {
+            if ("envMap" in mat) {
+              (mat as any).envMap = texture;
+              mat.needsUpdate = true;
+            }
+          });
+        }
+      });
+    }, undefined, (err) => {
+      console.warn("Failed to load sky texture, status: ", err);
+    });
 
     // --- 2. Camera Setup ---
     // Top-down perspective isometric camera
@@ -153,69 +677,40 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
     baseTarget.y += 0.75;
     camera.lookAt(baseTarget);
 
-    // Apply graphicsQuality presets (1: Low, 2: Medium, 3: High, 4: Ultra)
+    // Apply graphicsQuality presets (1: Low, 2: Medium, 3: High)
     let maxPixelRatio = 2.0;
     let shadowsEnabled = true;
     let shadowMapSize = 1024;
+    let antialiasEnabled = false; // Disable anti-aliasing by default to improve sharpness/perf
 
     if (graphicsQuality === 1) { // Low
-      maxPixelRatio = 0.85;
-      shadowsEnabled = false;
-    } else if (graphicsQuality === 2) { // Medium
       maxPixelRatio = 1.2;
       shadowsEnabled = false;
-    } else if (graphicsQuality === 3) { // High
+      antialiasEnabled = false;
+    } else if (graphicsQuality === 2) { // Medium
       maxPixelRatio = 1.8;
       shadowsEnabled = true;
-      shadowMapSize = 512;
-    } else if (graphicsQuality === 4) { // Ultra
+      shadowMapSize = 1024; // Increased resolution for cleaner shadows
+      antialiasEnabled = false;
+    } else if (graphicsQuality === 3) { // High
       maxPixelRatio = 2.2;
       shadowsEnabled = true;
-      shadowMapSize = 1024;
+      shadowMapSize = 2048; // Ultra resolution for pixel-perfect soft shadows
+      antialiasEnabled = true; // MSAA enabled on highest settings
     }
 
     // --- 3. Renderer Setup ---
-    // Primary WebGPURenderer with automatic seamless fallback to WebGL if WebGPU is unsupported.
-    let isRendererReady = false;
-    let renderer: any;
-    try {
-      renderer = new WebGPURenderer({
-        canvas: canvasRef.current,
-        antialias: true,
-        powerPreference: "high-performance",
-      });
-      renderer.init().then(() => {
-        isRendererReady = true;
-      }).catch((e: any) => {
-        console.warn("WebGPURenderer custom initialization fell back due to error:", e);
-        try { renderer.dispose(); } catch (_) {}
-        renderer = new THREE.WebGLRenderer({
-          canvas: canvasRef.current,
-          antialias: true,
-          powerPreference: "high-performance",
-        });
-        renderer.setSize(width, height);
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio, maxPixelRatio));
-        if (renderer.shadowMap) {
-          renderer.shadowMap.enabled = shadowsEnabled;
-          renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-        }
-        renderer.toneMapping = SCENE_CONFIG.toneMapping;
-        renderer.toneMappingExposure = SCENE_CONFIG.exposure;
-        isRendererReady = true;
-      });
-    } catch (e) {
-      console.warn("WebGPURenderer custom initialization is unsupported, falling back to WebGLRenderer:", e);
-      renderer = new THREE.WebGLRenderer({
-        canvas: canvasRef.current,
-        antialias: true,
-        powerPreference: "high-performance",
-      });
-      isRendererReady = true;
-    }
+    // Stable, highly optimized WebGLRenderer with flawless shadow, fog, and reflection compile support
+    let isRendererReady = true;
+    const renderer = new THREE.WebGLRenderer({
+      canvas: canvasRef.current,
+      antialias: antialiasEnabled,
+      powerPreference: "high-performance",
+    });
 
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, maxPixelRatio));
+    rendererRef.current = renderer;
     
     if (renderer.shadowMap) {
       renderer.shadowMap.enabled = shadowsEnabled;
@@ -224,10 +719,52 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
     renderer.toneMapping = SCENE_CONFIG.toneMapping;
     renderer.toneMappingExposure = SCENE_CONFIG.exposure;
 
+    // --- 3.5 Post-Processing (OutlinePass for Roblox Highlight Outline) ---
+    // Use high precision HalfFloatType render target to fully eliminate color banding/stripes on surfaces in post-processing
+    const composerSize = renderer.getDrawingBufferSize(new THREE.Vector2());
+    const composerTarget = new THREE.WebGLRenderTarget(composerSize.width, composerSize.height, {
+      type: THREE.HalfFloatType,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+    });
+    const composer = new EffectComposer(renderer, composerTarget);
+    const renderPass = new RenderPass(scene, camera);
+    composer.addPass(renderPass);
+
+    const outlinePass = new OutlinePass(
+      new THREE.Vector2(width, height),
+      scene,
+      camera
+    );
+    // Roblox Highlight-style pure white sharp outline
+    outlinePass.edgeStrength = 10.0;     // Extremely sharp boundary
+    outlinePass.edgeGlow = 0.0;         // Clean flat color, no neon glow as requested
+    outlinePass.edgeThickness = 1.35;    // Neat thickness
+    outlinePass.pulsePeriod = 0.0;      // No pulsing animation
+    outlinePass.visibleEdgeColor.set("#ffffff"); // Solid pure white
+    outlinePass.hiddenEdgeColor.set("#ffffff");  // Even when blocked
+    composer.addPass(outlinePass);
+
+    // --- 3.6 Unreal Bloom Pass (Beautiful Dreamy Glow!) ---
+    const bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(width, height),
+      0.15,   // bloomStrength (0.15 per user's tuned setup)
+      0.0,    // bloomRadius (0.0 per user's tuned setup)
+      1.0     // bloomThreshold (1.0 per user's tuned setup)
+    );
+    bloomPass.enabled = graphicsQuality > 1;
+    composer.addPass(bloomPass);
+    bloomPassRef.current = bloomPass;
+
+    const outputPass = new OutputPass();
+    composer.addPass(outputPass);
+
     // --- 4. Lights Setup ---
     // Lavender/purple-tinted ambient light supply
     const ambientLight = new THREE.AmbientLight(SCENE_CONFIG.ambientLightColor, SCENE_CONFIG.ambientLightIntensity);
     scene.add(ambientLight);
+    ambientLightRef.current = ambientLight;
 
     // Main Directional Sun Light (Warm sunset glow)
     const sunLight = new THREE.DirectionalLight(SCENE_CONFIG.dirLightColor, SCENE_CONFIG.dirLightIntensity);
@@ -243,16 +780,19 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
     sunLight.shadow.camera.far = 120;
     
     // Soft shadow radius for high blur width
-    sunLight.shadow.radius = 7.0;
-    
-    // Tighter bounding frustum focused around active player results in extremely dense, sharp shadow pixels
-    const d = 16;
+    sunLight.shadow.radius = 3.0;
+
+    // Expanded shadow casting frustum to prevent clipping at a distance
+    const d = 36;
     sunLight.shadow.camera.left = -d;
     sunLight.shadow.camera.right = d;
     sunLight.shadow.camera.top = d;
     sunLight.shadow.camera.bottom = -d;
-    sunLight.shadow.bias = SCENE_CONFIG.dirLightShadowBias;
+    // Set a small positive shadow bias to completely eliminate shadow acne/banding stripes on the floor/surfaces
+    sunLight.shadow.bias = 0.00015;
+    sunLight.shadow.normalBias = 0.04;
     scene.add(sunLight);
+    sunLightRef.current = sunLight;
 
     // Warm soft bounce lighting pointing upward
     const bounceLight = new THREE.DirectionalLight(0x352945, 0.6);
@@ -284,14 +824,179 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
     const floorGeo = new THREE.PlaneGeometry(50, 50);
     const floorMat = new THREE.MeshStandardMaterial({
       map: floorTexture,
-      roughness: 0.9,
-      metalness: 0.1,
+      roughness: 0.15,
+      metalness: 0.16,
+      envMapIntensity: 0.2, // Slightly higher reflections
+      envMap: loadedSkyTexture || undefined,
     });
 
     const floor = new THREE.Mesh(floorGeo, floorMat);
     floor.rotation.x = -Math.PI / 2;
     floor.receiveShadow = true;
     scene.add(floor);
+
+    // Store custom high-precision colliders (triangles)
+    const mapTriangles: WorldTriangle[] = [];
+
+    const setupInteractiveMaterials = (sceneGroup: THREE.Group) => {
+      // Find and cache the high-fidelity Bomb mesh from map.glb, keeping it hidden on start
+      sceneGroup.traverse((child) => {
+        if (child.name === "Bomb" || child.name === "bomb" || child.name.toLowerCase() === "bomb") {
+          child.visible = false;
+          (window as any).cachedBombMesh = child;
+        }
+      });
+
+      // Find and hold a reference to our physical interactive Button mesh and its default local height
+      const foundBtn = sceneGroup.getObjectByName("Button");
+      if (foundBtn && foundBtn instanceof THREE.Mesh) {
+        buttonMeshRef.current = foundBtn;
+        if (foundBtn.userData.originalY === undefined) {
+          foundBtn.userData.originalY = foundBtn.position.y;
+        }
+        initialButtonYRef.current = foundBtn.userData.originalY;
+        
+        // Clone material so we can dynamically adjust colors without side-effects on shared mesh materials
+        if (Array.isArray(foundBtn.material)) {
+          foundBtn.material = foundBtn.material.map(m => m.clone());
+        } else if (foundBtn.material) {
+          foundBtn.material = foundBtn.material.clone();
+        }
+        
+        const mats = Array.isArray(foundBtn.material) ? foundBtn.material : [foundBtn.material];
+        mats.forEach((mat: any) => {
+          if (mat && "emissive" in mat) {
+            mat.emissive = new THREE.Color("#00E736");
+            if ("emissiveIntensity" in mat) {
+              mat.emissiveIntensity = 2.0;
+            }
+          }
+          if (mat && "roughness" in mat) {
+            mat.roughness = 1.0;
+          }
+          if (mat && "metalness" in mat) {
+            mat.metalness = 0.0;
+          }
+        });
+      }
+
+      sceneGroup.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          child.castShadow = true;
+          child.receiveShadow = true;
+
+          // Keep beautiful pre-configured materials and roughness directly from the GLTF file!
+          if (child.material) {
+            const mats = Array.isArray(child.material) ? child.material : [child.material];
+            mats.forEach((mat) => {
+              if ("envMapIntensity" in mat) {
+                (mat as any).envMapIntensity = 0.25; // Standard subtle environmental reflection intensity
+              }
+              if (loadedSkyTexture && "envMap" in mat) {
+                (mat as any).envMap = loadedSkyTexture;
+              }
+
+              mat.needsUpdate = true;
+            });
+          }
+        }
+      });
+    };
+
+    const initScriptController = () => {
+      if (scriptControllerRef.current) {
+        scriptControllerRef.current.cleanup();
+      }
+      scriptControllerRef.current = new ClientScriptController(
+        roomInfo.id,
+        roomInfo,
+        playerId,
+        scene,
+        camera,
+        renderer,
+        composer,
+        ws,
+        (id, element) => setCustomUIElements(prev => ({ ...prev, [id]: element })),
+        (id) => setCustomUIElements(prev => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        }),
+        (x, y, z) => queryGroundHeight(x, y, z, mapTriangles),
+        () => playerPos.current,
+        (pos) => {
+          playerPos.current.copy(pos);
+          if (scriptControllerRef.current) {
+            scriptControllerRef.current.triggerPositionSet(pos);
+          }
+        }
+      );
+    };
+
+    if (mapGltfCache) {
+      // Memory Cache hit: Instantly add cloned model and bypass network load
+      const cachedScene = mapGltfCache.scene.clone();
+      scene.add(cachedScene);
+      floor.visible = false;
+      setupInteractiveMaterials(cachedScene);
+      mapTriangles.push(...mapGltfCache.triangles);
+      debugGroup.add(buildWireframeFromTriangles(mapGltfCache.triangles));
+
+      if (mapGltfCache.spawnLoc && !hasSpawnedRef.current) {
+        playerPos.current.copy(mapGltfCache.spawnLoc);
+        hasSpawnedRef.current = true;
+      }
+      initScriptController();
+    } else {
+      // Memory Cache miss: Fetch map.glb asynchronously 
+      const mapUrl = new URL("../assets/models/map.glb", import.meta.url).href;
+      const gltfLoader = new GLTFLoader();
+      gltfLoader.load(
+        mapUrl,
+        (gltf) => {
+          scene.add(gltf.scene);
+          floor.visible = false;
+          setupInteractiveMaterials(gltf.scene);
+
+          // Extract high-precision world triangles for collision
+          const extractedTriangles: WorldTriangle[] = [];
+          gltf.scene.traverse((child) => {
+            if (child instanceof THREE.Mesh) {
+              if (child.name !== "Spawn" && child.name !== "Bomb" && child.name !== "bomb" && !child.name.toLowerCase().includes("bomb") && !child.name.includes("Sky") && !child.name.includes("Light") && !child.name.toLowerCase().includes("button")) {
+                extractedTriangles.push(...extractWorldTriangles(child));
+              }
+            }
+          });
+
+          mapTriangles.push(...extractedTriangles);
+          debugGroup.add(buildWireframeFromTriangles(extractedTriangles));
+
+          // Extract Spawn position
+          let spawnLoc: THREE.Vector3 | null = null;
+          const spawnObj = gltf.scene.getObjectByName("Spawn");
+          if (spawnObj) {
+            spawnLoc = new THREE.Vector3();
+            spawnObj.getWorldPosition(spawnLoc);
+            if (!hasSpawnedRef.current) {
+              playerPos.current.copy(spawnLoc);
+              hasSpawnedRef.current = true;
+            }
+          }
+
+          // Populate cache so next quality shifts are 100% instant
+          mapGltfCache = {
+            scene: gltf.scene,
+            triangles: extractedTriangles,
+            spawnLoc: spawnLoc
+          };
+          initScriptController();
+        },
+        undefined,
+        (err) => {
+          console.warn("Failed to load map.glb, keeping grid floor. Error details: ", err);
+        }
+      );
+    }
 
     // --- 6. Obstacles Setup (Empty list) ---
     const obstacleGeometries: Array<{ mesh: THREE.Mesh; x: number; z: number; radius: number }> = [];
@@ -401,7 +1106,7 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
       // Spawn slightly above the floor and slightly randomized around feet
       sprite.position.copy(pos);
       sprite.position.x += (Math.random() - 0.5) * 0.4;
-      sprite.position.y = 0.05 + Math.random() * 0.08;
+      sprite.position.y = pos.y + 0.05 + Math.random() * 0.08;
       sprite.position.z += (Math.random() - 0.5) * 0.4;
 
       // Random scale between 0.22 and 0.44
@@ -436,9 +1141,73 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
       });
     };
 
+    const emitLandingParticles = (pos: THREE.Vector3) => {
+      for (let i = 0; i < 6; i++) {
+        const useType1 = Math.random() < 0.5;
+        const tex = useType1 ? particle1Texture : particle2Texture;
+
+        const pMat = new THREE.SpriteMaterial({
+          map: tex,
+          transparent: true,
+          opacity: 0.0,
+          depthWrite: false,
+        });
+
+        const sprite = new THREE.Sprite(pMat);
+        
+        const angle = (i / 6) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
+        const speed = 1.35 + Math.random() * 0.75;
+        const distance = 0.22;
+
+        sprite.position.copy(pos);
+        sprite.position.x += Math.cos(angle) * distance;
+        sprite.position.y = pos.y + 0.05 + Math.random() * 0.04;
+        sprite.position.z += Math.sin(angle) * distance;
+
+        const baseScale = 0.32 + Math.random() * 0.28;
+        sprite.scale.set(0.05 * baseScale, 0.05 * baseScale, 1.0);
+
+        const velocity = new THREE.Vector3(
+          Math.cos(angle) * speed,
+          0.38 + Math.random() * 0.38,
+          Math.sin(angle) * speed
+        );
+
+        sprite.material.rotation = Math.random() * Math.PI * 2;
+        const rotationSpeed = (Math.random() - 0.5) * 4.0;
+
+        const maxLife = 0.35 + Math.random() * 0.25;
+
+        scene.add(sprite);
+        activeParticles.push({
+          mesh: sprite,
+          velocity,
+          life: maxLife,
+          maxLife,
+          type: "walk",
+          rotationSpeed,
+          baseScale,
+        });
+      }
+    };
+
     // --- 7. Player Meshes Dictionary ---
     const localPlayerGroup = new THREE.Group();
     scene.add(localPlayerGroup);
+
+    // Collision capsule wireframe for local player (matches actual PLAYER_RADIUS)
+    const localPlayerColliderGeo = new THREE.CapsuleGeometry(PLAYER_RADIUS, CAPSULE_LENGTH, 8, 8);
+    const localPlayerColliderMat = new THREE.MeshBasicMaterial({
+      color: 0x33ff33, // distinct green for local player
+      wireframe: true,
+      transparent: true,
+      opacity: 0.7,
+      depthTest: false
+    });
+    const localPlayerColliderMesh = new THREE.Mesh(localPlayerColliderGeo, localPlayerColliderMat);
+    localPlayerColliderMesh.position.y = CAPSULE_CENTER_Y;
+    localPlayerColliderMesh.visible = false;
+    debugGroup.add(localPlayerColliderMesh);
 
     const otherPlayerMeshes: Record<string, THREE.Group> = {};
 
@@ -551,16 +1320,18 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
       { name_en: "NODE avatar", name_ru: "NODE аватар", cost: 0, path: "Avatar_node.png", flags: "admin" }
     ];
 
-    const textureCache: Record<number, THREE.Texture> = {};
+    const textureCache: Record<string, THREE.Texture> = {};
 
     function getAvatarTexture(styleId: number): THREE.Texture {
-      if (textureCache[styleId]) return textureCache[styleId];
+      const currentTimestamp = avatarsTimestampRef.current || 0;
+      const cacheKey = `${styleId}_${currentTimestamp}`;
+      if (textureCache[cacheKey]) return textureCache[cacheKey];
 
       const activeAvatars = avatarsRef.current || defaultAvatars;
       const avatarDef = activeAvatars[styleId];
       if (!avatarDef) return playerTexture;
 
-      const url = `https://cdn.jsdelivr.net/gh/calloradj-png/NodeAvatars@main/${avatarDef.path}`;
+      const url = `https://cdn.jsdelivr.net/gh/calloradj-png/NodeAvatars@main/${avatarDef.path}?t=${currentTimestamp}`;
       const tex = textureLoader.load(
         url,
         (loadedTex) => {
@@ -585,7 +1356,7 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
         }
       };
 
-      textureCache[styleId] = tex;
+      textureCache[cacheKey] = tex;
       return tex;
     }
 
@@ -612,11 +1383,14 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
       const faceMat = new THREE.MeshStandardMaterial({
         map: activeTexture,
         transparent: true,
+        opacity: 1.0,
         side: THREE.DoubleSide,
         color: 0xffffff, // Keep it neutral white so the player's custom sprite colors are displayed prinstinely!
         alphaTest: 0.25, // Cutout threshold to let Three.js cast actual paper-style sprite shape shadows!
         roughness: 0.7,
         metalness: 0.1,
+        envMapIntensity: 0.15,
+        envMap: loadedSkyTexture || undefined,
       });
 
       const bodyMesh = new THREE.Mesh(bodyGeo, faceMat);
@@ -625,6 +1399,21 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
       rotator.add(bodyMesh);
 
       g.add(cardGroup);
+
+      // Collision capsule wireframe for player (matches actual PLAYER_RADIUS)
+      const colGeo = new THREE.CapsuleGeometry(PLAYER_RADIUS, CAPSULE_LENGTH, 8, 8);
+      const colMat = new THREE.MeshBasicMaterial({
+        color: 0xff33ff,
+        wireframe: true,
+        transparent: true,
+        opacity: 0.6,
+        depthTest: false
+      });
+      const colMesh = new THREE.Mesh(colGeo, colMat);
+      colMesh.name = "collisionWireframe";
+      colMesh.position.y = CAPSULE_CENTER_Y;
+      colMesh.visible = false;
+      g.add(colMesh);
 
       return g;
     }
@@ -638,7 +1427,80 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
       localPlayerGroup.add(localRobot);
     }
 
-    // --- 8. Collectibles disabled ---
+    // --- 8. Flashlight & Proximity Prompt Setup (Removed as requested) ---
+    const playInteractionBeep = () => {
+      try {
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        if (!AudioCtx) return;
+        const ctx = new AudioCtx();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(523.25, ctx.currentTime); // C5
+        osc.frequency.setValueAtTime(659.25, ctx.currentTime + 0.12); // E5
+        
+        gain.gain.setValueAtTime(0.12, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+        
+        osc.start();
+        osc.stop(ctx.currentTime + 0.4);
+      } catch (e) {
+        console.warn("Audio Context blocked: ", e);
+      }
+    };
+
+    // Golden sparkler celebratory particle explosion
+    const emitCelebrationParticles = (pos: THREE.Vector3) => {
+      for (let i = 0; i < 28; i++) {
+        const useType1 = Math.random() < 0.5;
+        const tex = useType1 ? particle1Texture : particle2Texture;
+
+        const pMat = new THREE.SpriteMaterial({
+          map: tex,
+          transparent: true,
+          opacity: 0.0,
+          depthWrite: false,
+          color: 0xffca28 // Shimmering gold sparklers
+        });
+
+        const sprite = new THREE.Sprite(pMat);
+        sprite.position.copy(pos);
+        sprite.position.x += (Math.random() - 0.5) * 0.4;
+        sprite.position.y += (Math.random() - 0.5) * 0.4;
+        sprite.position.z += (Math.random() - 0.5) * 0.4;
+
+        const baseScale = 0.35 + Math.random() * 0.45;
+        sprite.scale.set(0.1, 0.1, 1.0);
+
+        const angle = Math.random() * Math.PI * 2;
+        const pitch = (Math.random() - 0.5) * Math.PI;
+        const speed = 1.3 + Math.random() * 1.6;
+        const velocity = new THREE.Vector3(
+          Math.cos(angle) * Math.cos(pitch) * speed,
+          Math.abs(Math.sin(pitch)) * speed + 0.5,
+          Math.sin(angle) * Math.cos(pitch) * speed
+        );
+
+        const rotationSpeed = (Math.random() - 0.5) * 6.0;
+        const maxLife = 0.8 + Math.random() * 0.6;
+
+        scene.add(sprite);
+        activeParticles.push({
+          mesh: sprite,
+          velocity,
+          life: maxLife,
+          maxLife,
+          type: "walk",
+          rotationSpeed,
+          baseScale
+        });
+      }
+    };
+
+
 
     // --- 9. Physics parameters ---
     const MAX_SPEED = 7.5; // cozy movement speed
@@ -648,7 +1510,21 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
     let localWalkTime = 0;
     let localAnimIntensity = 0;
     let localIdleTime = 0;
-    const otherAnimStates: Record<string, { walkTime: number; idleTime: number; animIntensity: number; lastFaceY: number; loadedStyleId?: number }> = {};
+    let localWasOnGround = true;
+    let localLandingSquish = 0;
+    let localLandingSquishVel = 0;
+    let localHighestAirY = playerPos.current.y;
+    const otherAnimStates: Record<string, { 
+      walkTime: number; 
+      idleTime: number; 
+      animIntensity: number; 
+      lastFaceY: number; 
+      loadedStyleId?: number; 
+      wasOnGround?: boolean; 
+      landingSquish?: number;
+      landingSquishVel?: number;
+      physPos?: THREE.Vector3;
+    }> = {};
 
     let localDistanceAccumulator = 0;
     const playerLastPos = new THREE.Vector3().copy(playerPos.current);
@@ -657,6 +1533,9 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
     const clock = new THREE.Clock();
     let animFrameId: number;
     let lastNetworkSend = 0;
+    const lastSentPos = new THREE.Vector3();
+    let lastSentRotY = 0;
+    let lastSentIsMoving = false;
 
     // --- 10. Frame Tick Animation Loop ----
     const tick = () => {
@@ -665,9 +1544,16 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
       const dt = Math.min(clock.getDelta(), 0.1); // clamp logic glitches
       if (dt <= 0) return;
 
+      if (scriptControllerRef.current) {
+        scriptControllerRef.current.update(dt, clock.getElapsedTime());
+      }
+
+
+
       const myId = playerIdRef.current;
       const allPlayers = playersStateRef.current;
       const activeMe = allPlayers[myId];
+      const isLocalPlayerDead = !!activeMe?.isDead || !!scriptControllerRef.current?.isPlayerLocallyDead?.();
 
       // Dynamically recreate local player visual mesh if skin changes in real-time
       if (activeMe) {
@@ -681,6 +1567,7 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
         }
       }
 
+      // --- 10*. Roblox Proximity Flashlight calculations (flashlight removed) ---
       // Get camera relative directions projected onto horizontal XZ plane
       const camForward = new THREE.Vector3(0, 0, -1);
       const camRight = new THREE.Vector3(1, 0, 0);
@@ -711,6 +1598,15 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
         inputZ = Math.max(-1, Math.min(1, inputZ));
       }
 
+      if (isLocalPlayerDead) {
+        inputX = 0;
+        inputZ = 0;
+        playerVel.current.set(0, 0, 0);
+        if (playerPos.current.y < -15.0) {
+          playerPos.current.y = -15.0;
+        }
+      }
+
       // Blend inputs on horizontal camera vectors
       const moveDir = new THREE.Vector3();
       moveDir.addScaledVector(camForward, -inputZ); // W/Up moves deep into the screenspace view
@@ -739,12 +1635,150 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
       playerPos.current.x += playerVel.current.x * dt;
       playerPos.current.z += playerVel.current.z * dt;
 
-      // Check arena outer borders (50x50, coordinate limit is -25 to +25)
-      const borderLimit = 24.2;
-      if (playerPos.current.x < -borderLimit) { playerPos.current.x = -borderLimit; playerVel.current.x = 0; }
-      if (playerPos.current.x > borderLimit) { playerPos.current.x = borderLimit; playerVel.current.x = 0; }
-      if (playerPos.current.z < -borderLimit) { playerPos.current.z = -borderLimit; playerVel.current.z = 0; }
-      if (playerPos.current.z > borderLimit) { playerPos.current.z = borderLimit; playerVel.current.z = 0; }
+      const isFocusedOnInput = document.activeElement?.tagName === "INPUT" || document.activeElement?.tagName === "TEXTAREA";
+      const isJumpAllowed = !avatarShopOpenRef.current && !editingProfileRef.current && !isFocusedOnInput;
+
+      // Calculate dynamic ground height from high-fidelity map triangles underneath the player with proper hysteresis
+      const mapLoaded = mapTriangles.length > 0;
+      let activeGroundY = mapLoaded ? -999.0 : 4.0;
+      const pPos = playerPos.current;
+      const currentStandRad = localWasOnGround ? (STAND_RADIUS * 1.15) : (STAND_RADIUS * 0.9);
+
+      mapTriangles.forEach((tri) => {
+        // Fast AABB check in XZ plane with current standing radius to detect standing overlap strictly
+        if (pPos.x < tri.min.x - currentStandRad || pPos.x > tri.max.x + currentStandRad ||
+            pPos.z < tri.min.z - currentStandRad || pPos.z > tri.max.z + currentStandRad) {
+          return;
+        }
+
+        // Only flat/mostly horizontal platforms (isFloor) can act as ground
+        if (!tri.isFloor) return;
+
+        // Query the closest point on the triangle to player's ground level
+        const closestPt = new THREE.Vector3();
+        getClosestPointOnTriangle(pPos, tri.a, tri.b, tri.c, closestPt);
+
+        // Check if player's XZ falls within hysteresis standing radius of the closest point on the triangle
+        const hDx = pPos.x - closestPt.x;
+        const hDz = pPos.z - closestPt.z;
+        const hDist = Math.sqrt(hDx * hDx + hDz * hDz);
+
+        if (hDist < currentStandRad) {
+          const isAbovePlatform = pPos.y >= closestPt.y - 0.05;
+          const isFallingOrWalking = playerVel.current.y <= 0.05;
+          // Step-climbing (up to 0.28 units) is only allowed when already grounded, preventing airborne jitter-snaps
+          const maxStepOrOvershoot = (isFallingOrWalking && localWasOnGround) ? 0.28 : 0.02;
+
+          const isWithinVertRange = (closestPt.y - pPos.y >= -0.05) && (closestPt.y - pPos.y <= maxStepOrOvershoot);
+
+          if (isAbovePlatform || isWithinVertRange) {
+            if (closestPt.y > activeGroundY) {
+              activeGroundY = closestPt.y;
+            }
+          }
+        }
+      });
+
+      let wantsToJump = (keyboard["Space"] || mobileJumpTriggered.current) && isJumpAllowed;
+      if (isLocalPlayerDead) {
+        wantsToJump = false;
+      }
+      mobileJumpTriggered.current = false; // consume trigger
+
+      const isOnGround = playerPos.current.y <= activeGroundY + 0.01;
+      const gravity = 25.0; // comfy gravity
+      const jumpStrength = 10.0; // comfy jump height/inertia
+
+      if (isOnGround) {
+        playerPos.current.y = activeGroundY;
+        if (playerVel.current.y < 0) {
+          playerVel.current.y = 0;
+        }
+        if (wantsToJump) {
+          playerVel.current.y = jumpStrength;
+        }
+      } else {
+        // Apply gravity
+        playerVel.current.y -= gravity * dt;
+      }
+
+      // Update position (vertical)
+      playerPos.current.y += playerVel.current.y * dt;
+
+      // Prevent going below ground bounds
+      if (playerPos.current.y < activeGroundY) {
+        playerPos.current.y = activeGroundY;
+        playerVel.current.y = 0;
+      }
+
+      // Arena outer boundaries removed per user request to allow models outside map bounds
+
+      // Check high-fidelity map triangle lateral (wall/column) collisions
+      mapTriangles.forEach((tri) => {
+        // Fast AABB check in XZ first
+        if (pPos.x < tri.min.x - PLAYER_RADIUS || pPos.x > tri.max.x + PLAYER_RADIUS ||
+            pPos.z < tri.min.z - PLAYER_RADIUS || pPos.z > tri.max.z + PLAYER_RADIUS) {
+          return;
+        }
+
+        // Floor triangles only act as ground to stand on; they must NEVER push the player horizontally
+        if (tri.isFloor) {
+          return;
+        }
+
+        // Step height threshold: if the top edge of this obstacle/wall is below the player's soft step height (0.32 units high from feet),
+        // we ignore it as a horizontal wall; this prevents sudden ejections/sliding when standing near the edge of boxes!
+        if (tri.max.y <= pPos.y + 0.32) {
+          return;
+        }
+
+        // Must overlap in Y (player vertical bounding span: [pPos.y, pPos.y + 2.4])
+        if (pPos.y + 2.4 < tri.min.y - 0.05 || pPos.y > tri.max.y + 0.05) {
+          return;
+        }
+
+        // Find closest point on the triangle to player's vertical axis at this triangle's height
+        const targetY = Math.max(tri.min.y, Math.min(pPos.y + 1.2, tri.max.y));
+        const pQuery = new THREE.Vector3(pPos.x, targetY, pPos.z);
+        const closestPt = new THREE.Vector3();
+        getClosestPointOnTriangle(pQuery, tri.a, tri.b, tri.c, closestPt);
+
+        // Horizontal push-out
+        const diffX = pPos.x - closestPt.x;
+        const diffZ = pPos.z - closestPt.z;
+        const horizontalDist = Math.sqrt(diffX * diffX + diffZ * diffZ);
+
+        if (horizontalDist < PLAYER_RADIUS) {
+          const overlap = PLAYER_RADIUS - horizontalDist;
+          const pushDir = new THREE.Vector3(diffX, 0, diffZ);
+          if (pushDir.lengthSq() < 0.0001) {
+            // Push along triangle's face normal horizontally
+            pushDir.set(tri.normal.x, 0, tri.normal.z);
+            if (pushDir.lengthSq() < 0.0001) {
+              pushDir.set(1, 0, 0);
+            } else {
+              pushDir.normalize();
+            }
+          } else {
+            pushDir.normalize();
+          }
+
+          // Smooth out sudden lateral collision snaps (especially when falling off platforms)
+          // by limiting the maximum snap distance per frame, making the transition seamless.
+          // Grounded collisions still resolve instantly, while falling/airborne collisions slide off beautifully.
+          const maxSnap = localWasOnGround ? overlap : Math.max(1.8 * dt, Math.min(overlap, 6.0 * dt + overlap * 0.1));
+          const snapApplied = Math.min(overlap, maxSnap);
+          pPos.x += pushDir.x * snapApplied;
+          pPos.z += pushDir.z * snapApplied;
+
+          // Slide along wall surface by canceling velocity directed inside
+          const dot = playerVel.current.x * pushDir.x + playerVel.current.z * pushDir.z;
+          if (dot < 0) {
+            playerVel.current.x -= pushDir.x * dot;
+            playerVel.current.z -= pushDir.z * dot;
+          }
+        }
+      });
 
       // Check obstacle collisions (sliding circle bounds pushing radially outward)
       obstacleGeometries.forEach((o) => {
@@ -771,6 +1805,114 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
         }
       });
 
+      // Kinematic collisions with dynamic server-simulated physical balls
+      ballStates.forEach((ball) => {
+        const closestY = Math.max(playerPos.current.y, Math.min(ball.y, playerPos.current.y + CAPSULE_HEIGHT));
+        const pAxisPt = new THREE.Vector3(playerPos.current.x, closestY, playerPos.current.z);
+        const ballPos3D = new THREE.Vector3(ball.x, ball.y, ball.z);
+        const dist = pAxisPt.distanceTo(ballPos3D);
+        const minDist = ball.radius + PLAYER_RADIUS;
+
+        if (dist < minDist) {
+          const overlap = minDist - dist;
+          const pushDir = new THREE.Vector3().subVectors(pAxisPt, ballPos3D);
+          if (pushDir.lengthSq() < 0.0001) {
+            pushDir.set(1, 0, 0);
+          } else {
+            pushDir.normalize();
+          }
+
+          // Push player out in 3D (allows sliding over smaller balls or standing on larger ones!)
+          playerPos.current.x += pushDir.x * overlap;
+          playerPos.current.y += pushDir.y * overlap;
+          playerPos.current.z += pushDir.z * overlap;
+
+          // Slide velocity
+          const dot = playerVel.current.x * pushDir.x + playerVel.current.y * pushDir.y + playerVel.current.z * pushDir.z;
+          if (dot < 0) {
+            playerVel.current.x -= pushDir.x * dot;
+            playerVel.current.y -= pushDir.y * dot;
+            playerVel.current.z -= pushDir.z * dot;
+          }
+          
+          if (pushDir.y > 0.5) {
+            // Stand on top of the ball dynamically!
+            const standHeight = ball.y + ball.radius;
+            if (standHeight > activeGroundY) {
+              activeGroundY = standHeight;
+            }
+          }
+        }
+      });
+
+      // Interpolate and rotate dynamic server-controlled dynamic sphere bodies
+      ballStates.forEach((state, id) => {
+        const mesh = ballMeshes.get(id);
+        if (mesh) {
+          state.lerpTime += dt * 10; // server replication is 10Hz (every 100ms)
+          const t = Math.min(1, state.lerpTime);
+          state.x = THREE.MathUtils.lerp(state.startX, state.targetX, t);
+          state.y = THREE.MathUtils.lerp(state.startY, state.targetY, t);
+          state.z = THREE.MathUtils.lerp(state.startZ, state.targetZ, t);
+          mesh.position.set(state.x, state.y, state.z);
+          // Visually scale the bomb to be exactly 3.0x larger (1.5x bigger than before) while keeping the actual physics hitbox un-scaled
+          if (id.startsWith("bomb")) {
+            mesh.scale.setScalar(state.radius * 3.0);
+          } else {
+            mesh.scale.setScalar(state.radius);
+          }
+
+          // Slowly and smoothly blink red if this is a bomb
+          if (id.startsWith("bomb")) {
+            const elapsed = clock.getElapsedTime();
+            // Pulse smoothly using a sine wave
+            const pulse = (Math.sin(elapsed * Math.PI) + 1) / 2;
+            
+            mesh.traverse((child) => {
+              if (child instanceof THREE.Mesh && child.material) {
+                const mats = Array.isArray(child.material) ? child.material : [child.material];
+                mats.forEach((mat) => {
+                  if ("color" in mat && !mat.userData.savedColor) {
+                    mat.userData.savedColor = mat.color.clone();
+                  }
+                  if ("emissive" in mat && !mat.userData.savedEmissive) {
+                    mat.userData.savedEmissive = (mat.emissive ? mat.emissive.clone() : new THREE.Color(0x000000));
+                  }
+                  
+                  if (mat && "color" in mat && mat.userData.savedColor) {
+                    const orig = mat.userData.savedColor as THREE.Color;
+                    mat.color.copy(orig).lerp(new THREE.Color(0xff0000), pulse * 0.85);
+                  }
+                  if (mat && "emissive" in mat && mat.userData.savedEmissive) {
+                    const orig = mat.userData.savedEmissive as THREE.Color;
+                    mat.emissive.copy(orig).lerp(new THREE.Color(0xff0000), pulse * 0.85);
+                    if ("emissiveIntensity" in mat) {
+                      mat.emissiveIntensity = pulse * 2.0;
+                    }
+                  }
+                });
+              }
+            });
+          }
+
+          // Update ball hitbox visibility
+          const hitbox = mesh.getObjectByName("hitboxWireframe");
+          if (hitbox) {
+            hitbox.visible = showHitboxesRef.current;
+          }
+
+          // Rotate dynamic balls on client proportionate to velocity for full 3D rolling physics!
+          const vx = (state.targetX - state.startX) / 0.1;
+          const vz = (state.targetZ - state.startZ) / 0.1;
+          const speed = Math.sqrt(vx * vx + vz * vz);
+          if (speed > 0.1) {
+            const rotAxis = new THREE.Vector3(-vz, 0, vx).normalize();
+            const angleDelta = (speed / state.radius) * dt;
+            mesh.rotateOnWorldAxis(rotAxis, angleDelta);
+          }
+        }
+      });
+
       // Calculate target horizontal rotation: face left/right relative to screen's camRight vector
       if (isMoving) {
         const moveRightDot = moveDir.dot(camRight);
@@ -783,6 +1925,58 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
 
       // Apply to 3D local visual mesh group position
       localPlayerGroup.position.copy(playerPos.current);
+
+      if (isLocalPlayerDead) {
+        localPlayerGroup.visible = false;
+        localPlayerColliderMesh.visible = false;
+      } else {
+        localPlayerGroup.visible = true;
+        localPlayerColliderMesh.visible = showHitboxesRef.current;
+      }
+
+      // Update local player collider wireframe position and visibility
+      localPlayerColliderMesh.position.copy(playerPos.current);
+      localPlayerColliderMesh.position.y += CAPSULE_CENTER_Y;
+      debugGroup.visible = showHitboxesRef.current;
+
+      // Animate interactive button position and material colors smoothly
+      if (buttonMeshRef.current) {
+        const targetY = buttonPressedStateRef.current 
+          ? (initialButtonYRef.current - 0.04) // Depress button slightly downwards
+          : initialButtonYRef.current;
+        
+        const blend = 1.0 - Math.exp(-12.0 * dt);
+        buttonMeshRef.current.position.y += (targetY - buttonMeshRef.current.position.y) * blend;
+
+        const mats = Array.isArray(buttonMeshRef.current.material)
+          ? buttonMeshRef.current.material
+          : [buttonMeshRef.current.material];
+
+        const targetColorHex = buttonPressedStateRef.current ? "#ff0000" : "#00E736";
+        const targetEmissiveHex = buttonPressedStateRef.current ? "#ff0000" : "#00E736";
+        const targetIntensity = buttonPressedStateRef.current ? 5.7 : 2.0;
+
+        const tempColor = new THREE.Color(targetColorHex);
+        const tempEmissive = new THREE.Color(targetEmissiveHex);
+
+        mats.forEach((mat: any) => {
+          if (mat.color) {
+            mat.color.lerp(tempColor, blend);
+          }
+          if (mat.emissive) {
+            mat.emissive.lerp(tempEmissive, blend);
+          }
+          if ("emissiveIntensity" in mat) {
+            mat.emissiveIntensity = targetIntensity;
+          }
+          if ("roughness" in mat) {
+            mat.roughness = 1.0; // Maximum roughness to remove any specular highlight/glossiness completely
+          }
+          if ("metalness" in mat) {
+            mat.metalness = 0.0; // No metalness
+          }
+        });
+      }
       
       // Smoothly fade walking animations in and out
       if (isMoving) {
@@ -794,19 +1988,95 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
 
       localIdleTime += dt;
 
-      // Dynamic walking bounce (hop) and side-to-side wobble blended with a cozy squishy idle breathing animation
-      const walkHop = Math.abs(Math.sin(localWalkTime)) * 0.16 * localAnimIntensity;
-      const idleBob = Math.sin(localIdleTime * 3.5) * 0.035 * (1.0 - localAnimIntensity); // gentle breathing bobbing
-      localPlayerGroup.position.y = 0.01 + walkHop + idleBob;
+      // Handle landing trigger with harmonic spring physics
+      const currentIsOnGround = playerPos.current.y <= activeGroundY + 0.01;
       
-      const walkWobble = Math.sin(localWalkTime) * 0.06 * localAnimIntensity;
-      const idleWobble = Math.cos(localIdleTime * 2.0) * 0.015 * (1.0 - localAnimIntensity); // soft idle wobble
+      if (!currentIsOnGround) {
+        if (localWasOnGround) {
+          localHighestAirY = playerPos.current.y;
+        } else {
+          localHighestAirY = Math.max(localHighestAirY, playerPos.current.y);
+        }
+      }
+
+      if (currentIsOnGround) {
+        if (!localWasOnGround) {
+          // Landing impact! Only trigger effects if they actually fell down at least 0.45 units
+          const fallDistance = localHighestAirY - activeGroundY;
+          if (fallDistance > 0.45) {
+            localLandingSquishVel = -3.8;
+            emitLandingParticles(playerPos.current);
+          }
+        }
+        // Damped harmonic oscillator equations (F = -kx - cv)
+        const k = 145.0; // Spring stiffness
+        const c = 11.5;  // Spring damping
+        const force = -k * localLandingSquish - c * localLandingSquishVel;
+        localLandingSquishVel += force * dt;
+        localLandingSquish += localLandingSquishVel * dt;
+        localHighestAirY = activeGroundY; // reset
+      } else {
+        localLandingSquish = 0;
+        localLandingSquishVel = 0;
+      }
+      localWasOnGround = currentIsOnGround;
+
+      const relativeHeight = Math.max(0, playerPos.current.y - activeGroundY);
+      const airRatio = Math.min(1.0, relativeHeight / 1.55);
+      const groundBlend = 1.0 - airRatio;
+
+      // Dynamic walking bounce (hop) and side-to-side wobble blended with a cozy squishy idle breathing animation
+      const walkHop = Math.abs(Math.sin(localWalkTime)) * 0.16 * localAnimIntensity * groundBlend;
+      const idleBob = Math.sin(localIdleTime * 3.5) * 0.035 * (1.0 - localAnimIntensity) * groundBlend;
+      localPlayerGroup.position.y = playerPos.current.y + 0.01 + walkHop + idleBob;
+      
+      const walkWobble = Math.sin(localWalkTime) * 0.06 * localAnimIntensity * groundBlend;
+      const idleWobble = Math.cos(localIdleTime * 2.0) * 0.015 * (1.0 - localAnimIntensity) * groundBlend;
       localPlayerGroup.rotation.z = walkWobble + idleWobble;
 
-      // Squishy breathing stretch and squash
-      const idleScaleX = 1.0 + Math.sin(localIdleTime * 3.5) * 0.025 * (1.0 - localAnimIntensity);
-      const idleScaleY = 1.0 - Math.sin(localIdleTime * 3.5) * 0.025 * (1.0 - localAnimIntensity);
-      localPlayerGroup.scale.set(idleScaleX, idleScaleY, 1.0);
+      // Squishy cartoon stretch and squash with modern landing physics
+      let targetScaleX = 1.0;
+      let targetScaleY = 1.0;
+
+      if (!currentIsOnGround) {
+        // Continuous organic air deformation depending on vertical speed!
+        const yVel = playerVel.current.y;
+        const apexWeight = Math.exp(-(yVel * yVel) / 12.0); // 1.0 at peak (0 velocity), decays smoothly
+
+        let targetVelX = 1.0;
+        let targetVelY = 1.0;
+        if (yVel > 0) {
+          const stretchAmount = yVel * 0.012;
+          targetVelX = 1.0 - stretchAmount;
+          targetVelY = 1.0 + stretchAmount;
+        } else {
+          const stretchAmount = Math.abs(yVel) * 0.010;
+          targetVelX = 1.0 - stretchAmount * 0.8;
+          targetVelY = 1.0 + stretchAmount;
+        }
+
+        // Beautiful continuous blend between flying stretch and cozy apex float squish
+        targetScaleX = targetVelX * (1.0 - apexWeight) + 1.08 * apexWeight;
+        targetScaleY = targetVelY * (1.0 - apexWeight) + 0.92 * apexWeight;
+
+        // Apply visual safety boundaries to prevent unnatural extreme deformations
+        targetScaleX = Math.max(0.85, Math.min(1.08, targetScaleX));
+        targetScaleY = Math.max(0.92, Math.min(1.15, targetScaleY));
+      } else {
+        // Normal breaths blended with soft oscillating landing spring
+        const idleScaleX = 1.0 + Math.sin(localIdleTime * 3.5) * 0.02 * (1.0 - localAnimIntensity);
+        const idleScaleY = 1.0 - Math.sin(localIdleTime * 3.5) * 0.02 * (1.0 - localAnimIntensity);
+
+        // When localLandingSquish is negative (squashed), we expand width / reduce height:
+        targetScaleX = idleScaleX - (localLandingSquish * 0.5);
+        targetScaleY = idleScaleY + (localLandingSquish * 0.45);
+      }
+
+      // Smoothly interpolate current visual scales to make animations extremely soft & fluid
+      const tScale = 1.0 - Math.exp(-15.0 * dt);
+      localPlayerGroup.scale.x += (targetScaleX - localPlayerGroup.scale.x) * tScale;
+      localPlayerGroup.scale.y += (targetScaleY - localPlayerGroup.scale.y) * tScale;
+      localPlayerGroup.scale.z = 1.0;
 
       // Smooth rotate 180 degrees around local Y axis to turn around paper-style!
       const localRotator = localPlayerGroup.getObjectByName("rotator");
@@ -823,32 +2093,50 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
       let targetCameraLook = new THREE.Vector3();
       let lerpFactor = 0.08;
 
-      if (avatarShopOpenRef.current) {
-        // High-angle diagonal view from above (вид сверху) for both mobile and desktop!
-        const isMobileScreen = window.innerWidth <= 768;
-        let shopOffset: THREE.Vector3;
-        if (isMobileScreen) {
-          // Position camera slightly higher and further back for a perfect top-down overview
-          shopOffset = new THREE.Vector3(-4.4, 4.2, 4.4);
+      if (isLocalPlayerDead) {
+        // Position camera relative to the center of the arena (0, 0, 0)
+        const center = new THREE.Vector3(0, 0, 0);
+        targetCameraLook.copy(center);
+
+        // Standard cozy 45-degree angle (isometric style, but far back and stationary)
+        const deadOffset = new THREE.Vector3(-12.0, 10.0, 12.0);
+
+        // Smoothly tilt the camera look-at direction ("its head") based on PC mouse cursor
+        const isMobileDeviceCheck = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || ("ontouchstart" in window);
+        if (!isMobileDeviceCheck) {
+          // Lerp the mouse inputs smoothly
+          smoothMouseX.current += (mouseX.current - smoothMouseX.current) * (1.0 - Math.exp(-6.0 * dt));
+          smoothMouseY.current += (mouseY.current - smoothMouseY.current) * (1.0 - Math.exp(-6.0 * dt));
+
+          // Horizontal look shift (panning parallel to camera's horizontal view axis: vector [1, 0, 1])
+          const panX = smoothMouseX.current * 4.0;
+          targetCameraLook.x += panX;
+          targetCameraLook.z += panX;
+
+          // Vertical look shift (tilting directly up/down along Y axis)
+          // smoothMouseY is positive when cursor is UP, negative when cursor is DOWN.
+          targetCameraLook.y += smoothMouseY.current * 4.0;
         } else {
-          shopOffset = new THREE.Vector3(-2.5, 2.4, 2.5);
+          smoothMouseX.current = 0;
+          smoothMouseY.current = 0;
         }
+
+        targetCameraPos.copy(center).add(deadOffset);
+        lerpFactor = 0.04; // smooth flying
+      } else if (avatarShopOpenRef.current) {
+        // High-angle diagonal view from above with elegant shift to the right to keep avatar visible
+        const shopOffset = new THREE.Vector3(-2.5, 2.4, 2.5);
 
         targetCameraPos.copy(playerPos.current).add(shopOffset);
         targetCameraLook.copy(playerPos.current);
 
-        if (isMobileScreen) {
-          // Slightly lower target look-at Y to center the player nicely without pushing them off-screen high
-          targetCameraLook.y -= 0.45;
-        } else {
-          targetCameraLook.y += 1.15; // Beautiful overhead framing for desktop split screen
-          // Off-center shift camera more to the right (visually pushes player further leftwards)
-          const camRightVec = new THREE.Vector3(1, 0, 1).normalize();
-          const pShiftAmount = 1.25;
-          const cameraShiftVec = camRightVec.clone().multiplyScalar(pShiftAmount);
-          targetCameraPos.add(cameraShiftVec);
-          targetCameraLook.add(cameraShiftVec);
-        }
+        targetCameraLook.y += 1.15; // Beautiful overhead framing
+        // Off-center shift camera more to the right (visually pushes player further leftwards)
+        const camRightVec = new THREE.Vector3(1, 0, 1).normalize();
+        const pShiftAmount = 1.25;
+        const cameraShiftVec = camRightVec.clone().multiplyScalar(pShiftAmount);
+        targetCameraPos.add(cameraShiftVec);
+        targetCameraLook.add(cameraShiftVec);
 
         // Force perpendicular camera facing Y rotation
         playerRotY.current = 0;
@@ -875,9 +2163,39 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
       // Frame-rate independent camera tracking. We use exponential decay based on 'dt'
       // to make the movement perfectly smooth across all refresh rates, completely
       // eliminating VSync/frame-tick timing mismatches (jitter).
-      const trackingSpeed = avatarShopOpenRef.current ? 12.0 : 7.5;
+      let trackingSpeed = 7.5;
+      if (avatarShopOpenRef.current) {
+        trackingSpeed = 12.0;
+      } else if (isLocalPlayerDead) {
+        trackingSpeed = 3.2; // Slow, smooth float-up transition
+      }
+
       const t = 1.0 - Math.exp(-trackingSpeed * dt);
       camera.position.lerp(targetCameraPos, t);
+
+      // Smooth and rapid camera shake on explosion
+      let shakeOffsetX = 0;
+      let shakeOffsetY = 0;
+      let shakeOffsetZ = 0;
+      if (cameraShakeIntensity > 0.01) {
+        cameraShakeTime += dt * 55; // Fast frequency for rapid shaking
+        shakeOffsetX = Math.sin(cameraShakeTime) * cameraShakeIntensity * 0.45;
+        shakeOffsetY = Math.cos(cameraShakeTime * 0.9) * cameraShakeIntensity * 0.35;
+        shakeOffsetZ = Math.sin(cameraShakeTime * 1.25) * cameraShakeIntensity * 0.45;
+        cameraShakeIntensity *= Math.exp(-5.0 * dt); // Exponential decay (resolves quickly and smoothly)
+      } else {
+        cameraShakeIntensity = 0;
+      }
+
+      if (cameraShakeIntensity > 0) {
+        camera.position.x += shakeOffsetX;
+        camera.position.y += shakeOffsetY;
+        camera.position.z += shakeOffsetZ;
+
+        targetCameraLook.x += shakeOffsetX * 0.6;
+        targetCameraLook.y += shakeOffsetY * 0.6;
+        targetCameraLook.z += shakeOffsetZ * 0.6;
+      }
 
       // Instantly direct camera focus at target look-at point (keeps player perfectly framed as originally)
       camera.lookAt(targetCameraLook);
@@ -895,38 +2213,50 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
             idleTime: Math.random() * 10, 
             animIntensity: 0, 
             lastFaceY: info.ry || 0,
-            loadedStyleId: info.avatarStyle
+            loadedStyleId: info.avatarStyle,
+            wasOnGround: true,
+            landingSquish: 0
           };
         }
 
+        const aState = otherAnimStates[pId];
+
         if (pMesh) {
-          if (otherAnimStates[pId].loadedStyleId !== info.avatarStyle) {
+          if (aState.loadedStyleId !== info.avatarStyle) {
             scene.remove(pMesh);
             pMesh = buildRobotMesh(info.color, info.avatarStyle);
             pMesh.position.set(info.x, info.y, info.z);
             scene.add(pMesh);
             otherPlayerMeshes[pId] = pMesh;
-            otherAnimStates[pId].loadedStyleId = info.avatarStyle;
+            aState.loadedStyleId = info.avatarStyle;
           }
         } else {
           pMesh = buildRobotMesh(info.color, info.avatarStyle);
           pMesh.position.set(info.x, info.y, info.z);
           scene.add(pMesh);
           otherPlayerMeshes[pId] = pMesh;
-          otherAnimStates[pId].loadedStyleId = info.avatarStyle;
+          aState.loadedStyleId = info.avatarStyle;
         }
 
-        // Calculate visual movement speed and direction
-        const lastPos = new THREE.Vector3().copy(pMesh.position);
+        // Maintain extremely clean physical coordinates to calculate movement speeds,
+        // bounds, and orientation completely isolated from visual bouncing offsets.
+        if (!aState.physPos) {
+          aState.physPos = new THREE.Vector3(info.x, info.y, info.z);
+        }
+
+        const lastPhysPos = new THREE.Vector3().copy(aState.physPos);
         const targetPos = new THREE.Vector3(info.x, info.y, info.z);
-        pMesh.position.lerp(targetPos, 0.15); // beautifully smooth transition
         
-        const otherMoveX = pMesh.position.x - lastPos.x;
-        const otherMoveZ = pMesh.position.z - lastPos.z;
+        // Beautifully smooth physical transition
+        aState.physPos.lerp(targetPos, 0.15);
+        
+        const otherMoveX = aState.physPos.x - lastPhysPos.x;
+        const otherMoveZ = aState.physPos.z - lastPhysPos.z;
+        const otherMoveY = aState.physPos.y - lastPhysPos.y;
+        const estimatedVelY = otherMoveY / Math.max(0.001, dt);
         const otherDispLen = Math.sqrt(otherMoveX * otherMoveX + otherMoveZ * otherMoveZ);
         const otherIsMoving = info.isMoving || (otherDispLen > 0.01);
 
-        const aState = otherAnimStates[pId];
         if (aState.idleTime === undefined) {
           aState.idleTime = Math.random() * 10;
         }
@@ -950,17 +2280,98 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
           aState.animIntensity += (0.0 - aState.animIntensity) * 10.0 * dt;
         }
 
-        const otherHop = Math.abs(Math.sin(aState.walkTime)) * 0.16 * aState.animIntensity;
-        const otherIdleBob = Math.sin(aState.idleTime * 3.5) * 0.035 * (1.0 - aState.animIntensity);
-        pMesh.position.y = 0.01 + otherHop + otherIdleBob;
+        const otherGroundY = queryGroundHeight(aState.physPos.x, aState.physPos.y, aState.physPos.z, mapTriangles);
+        const otherRelativeHeight = Math.max(0, aState.physPos.y - otherGroundY);
 
-        const otherWobble = Math.sin(aState.walkTime) * 0.06 * aState.animIntensity;
-        const otherIdleWobble = Math.cos(aState.idleTime * 2.0) * 0.015 * (1.0 - aState.animIntensity);
+        // Handle other landing trigger with robust raw-height noise hysteresis and spring physics
+        if (aState.wasOnGround === undefined) aState.wasOnGround = true;
+        if (aState.landingSquish === undefined) aState.landingSquish = 0;
+        if (aState.landingSquishVel === undefined) aState.landingSquishVel = 0;
+
+        // Hysteresis threshold to count as high vertical flying state
+        if (otherRelativeHeight > 0.45) {
+          aState.wasOnGround = false;
+        }
+
+        let triggeredLanding = false;
+        // Strict ground-contact threshold coupled with pre-existing flying state
+        if (!aState.wasOnGround && otherRelativeHeight <= 0.02) {
+          aState.wasOnGround = true;
+          triggeredLanding = true;
+        }
+
+        const otherIsOnGround = aState.physPos.y <= otherGroundY + 0.02;
+
+        if (triggeredLanding) {
+          // Instant landing impulse without interpolation delays!
+          aState.landingSquishVel = -3.8;
+          emitLandingParticles(new THREE.Vector3(aState.physPos.x, otherGroundY + 0.02, aState.physPos.z));
+        }
+
+        // Apply visual landing damping feedback when either touching physically or reacting to impulse
+        if (otherIsOnGround || Math.abs(aState.landingSquish) > 0.001) {
+          const k = 145.0;
+          const c = 11.5;
+          const force = -k * aState.landingSquish - c * aState.landingSquishVel;
+          aState.landingSquishVel += force * dt;
+          aState.landingSquish += aState.landingSquishVel * dt;
+        } else {
+          aState.landingSquish = 0;
+          aState.landingSquishVel = 0;
+        }
+
+        const otherAirRatio = Math.min(1.0, otherRelativeHeight / 1.55);
+        const otherGroundBlend = 1.0 - otherAirRatio;
+
+        const otherHop = Math.abs(Math.sin(aState.walkTime)) * 0.16 * aState.animIntensity * otherGroundBlend;
+        const otherIdleBob = Math.sin(aState.idleTime * 3.5) * 0.035 * (1.0 - aState.animIntensity) * otherGroundBlend;
+        
+        // Write the visual coordinates to pMesh: position on plane + height bounce
+        pMesh.position.x = aState.physPos.x;
+        pMesh.position.z = aState.physPos.z;
+        pMesh.position.y = aState.physPos.y + 0.01 + otherHop + otherIdleBob;
+
+        const otherWobble = Math.sin(aState.walkTime) * 0.06 * aState.animIntensity * otherGroundBlend;
+        const otherIdleWobble = Math.cos(aState.idleTime * 2.0) * 0.015 * (1.0 - aState.animIntensity) * otherGroundBlend;
         pMesh.rotation.z = otherWobble + otherIdleWobble;
 
-        const otherScaleX = 1.0 + Math.sin(aState.idleTime * 3.5) * 0.02 * (1.0 - aState.animIntensity);
-        const otherScaleY = 1.0 - Math.sin(aState.idleTime * 3.5) * 0.02 * (1.0 - aState.animIntensity);
-        pMesh.scale.set(otherScaleX, otherScaleY, 1.0);
+        let oScaleX = 1.0;
+        let oScaleY = 1.0;
+
+        if (!otherIsOnGround) {
+          const yVelOther = estimatedVelY;
+          const apexWeightOther = Math.exp(-(yVelOther * yVelOther) / 12.0);
+
+          let targetVelX = 1.0;
+          let targetVelY = 1.0;
+          if (yVelOther > 0) {
+            const stretchAmount = yVelOther * 0.012;
+            targetVelX = 1.0 - stretchAmount;
+            targetVelY = 1.0 + stretchAmount;
+          } else {
+            const stretchAmount = Math.abs(yVelOther) * 0.010;
+            targetVelX = 1.0 - stretchAmount * 0.8;
+            targetVelY = 1.0 + stretchAmount;
+          }
+
+          oScaleX = targetVelX * (1.0 - apexWeightOther) + 1.08 * apexWeightOther;
+          oScaleY = targetVelY * (1.0 - apexWeightOther) + 0.92 * apexWeightOther;
+
+          oScaleX = Math.max(0.85, Math.min(1.08, oScaleX));
+          oScaleY = Math.max(0.92, Math.min(1.15, oScaleY));
+        } else {
+          const oscScaleX = 1.0 + Math.sin(aState.idleTime * 3.5) * 0.02 * (1.0 - aState.animIntensity);
+          const oscScaleY = 1.0 - Math.sin(aState.idleTime * 3.5) * 0.02 * (1.0 - aState.animIntensity);
+
+          oScaleX = oscScaleX - (aState.landingSquish * 0.5);
+          oScaleY = oscScaleY + (aState.landingSquish * 0.45);
+        }
+
+        // Smoothly interpolate current visual scales for online players
+        const tScaleOther = 1.0 - Math.exp(-15.0 * dt);
+        pMesh.scale.x += (oScaleX - pMesh.scale.x) * tScaleOther;
+        pMesh.scale.y += (oScaleY - pMesh.scale.y) * tScaleOther;
+        pMesh.scale.z = 1.0;
 
         // Smoothly rotate the rotator child to face left/right
         const oRotator = pMesh.getObjectByName("rotator");
@@ -969,6 +2380,15 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
           oDiffY = Math.atan2(Math.sin(oDiffY), Math.cos(oDiffY));
           oRotator.rotation.y += oDiffY * 12.0 * dt;
         }
+
+        // Update collision wireframe visibility for other player
+        const colWire = pMesh.getObjectByName("collisionWireframe");
+        if (colWire) {
+          colWire.visible = showHitboxesRef.current;
+        }
+
+        // Force other players' visible meshes to be hidden when they are dead on the server
+        pMesh.visible = !info.isDead;
 
         // (Dynamic billing disabled for other players to preserve locked non-billboard angle)
       });
@@ -1039,23 +2459,23 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
         const aState = otherAnimStates[oId];
         const otherIsMoving = oInfo && (oInfo.isMoving || (aState && aState.animIntensity > 0.15));
 
-        if (otherIsMoving && oMesh) {
+        if (otherIsMoving && oMesh && aState && aState.physPos) {
           if (!otherDistanceAccumulators[oId]) {
             otherDistanceAccumulators[oId] = {
-              lastPos: new THREE.Vector3().copy(oMesh.position),
+              lastPos: new THREE.Vector3().copy(aState.physPos),
               distance: 0,
             };
           }
           const tracker = otherDistanceAccumulators[oId];
-          const distMoved = oMesh.position.distanceTo(tracker.lastPos);
+          const distMoved = aState.physPos.distanceTo(tracker.lastPos);
           if (distMoved < 5.0) {
             tracker.distance += distMoved;
             if (tracker.distance >= 0.85) {
-              emitWalkParticle(oMesh.position);
+              emitWalkParticle(aState.physPos);
               tracker.distance = 0;
             }
           }
-          tracker.lastPos.copy(oMesh.position);
+          tracker.lastPos.copy(aState.physPos);
         }
       });
 
@@ -1069,22 +2489,32 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
         }
       });
 
-      // 10e. THROTTLED POSITION BROADCAST TO WS SERVER (10 times per second)
+      // 10e. THROTTLED POSITION BROADCAST TO WS SERVER (10 times per second if position/rotation changed)
       const now = Date.now();
       if (now - lastNetworkSend > 100) {
         if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({
-            type: "move",
-            payload: {
-              x: playerPos.current.x,
-              y: playerPos.current.y,
-              z: playerPos.current.z,
-              rx: 0,
-              ry: playerRotY.current,
-              rz: 0,
-              isMoving: isMoving
-            }
-          }));
+          const distanceThreshold = 0.005;
+          const rotationThreshold = 0.005;
+          const posChanged = playerPos.current.distanceTo(lastSentPos) > distanceThreshold;
+          const rotChanged = Math.abs(playerRotY.current - lastSentRotY) > rotationThreshold;
+          const moveStateChanged = isMoving !== lastSentIsMoving;
+
+          if (posChanged || rotChanged || moveStateChanged) {
+            const buf = encodeClientMove(
+              playerPos.current.x,
+              playerPos.current.y,
+              playerPos.current.z,
+              0,
+              playerRotY.current,
+              0,
+              isMoving
+            );
+            ws.send(buf);
+
+            lastSentPos.copy(playerPos.current);
+            lastSentRotY = playerRotY.current;
+            lastSentIsMoving = isMoving;
+          }
         }
         lastNetworkSend = now;
       }
@@ -1116,7 +2546,7 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
         // Project local player using stable, non-bouncing physics position
         if (playerPos.current) {
           tempV.copy(playerPos.current);
-          tempV.y = 2.2; // fixed ground offset height for perfect non-jumping alignment
+          tempV.y = playerPos.current.y + 2.2; // include physical height + head spacing offset
           tempV.project(camera);
           
           const targetX = (tempV.x * 0.5 + 0.5) * w;
@@ -1137,8 +2567,7 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
           
           const el = document.getElementById(`bubble-container-${myId}`);
           if (el) {
-            const isMobile = window.innerWidth <= 768;
-            const scaleVal = isMobile ? 1 : uiScale;
+            const scaleVal = getDynamicScaleVal();
             const scaleStr = scaleVal !== 1 ? ` scale(${scaleVal})` : "";
             el.style.transform = `translate3d(${posX}px, ${posY}px, 0)${scaleStr}`;
             el.style.transformOrigin = "bottom center";
@@ -1149,9 +2578,11 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
         Object.keys(allPlayers).forEach((pId) => {
           if (pId === myId) return;
           const pMesh = otherPlayerMeshes[pId];
-          if (pMesh) {
-            tempV.copy(pMesh.position);
-            tempV.y = 2.2; // fixed height above ground to avoid active bounce animations
+          const info = allPlayers[pId];
+          const aState = otherAnimStates[pId];
+          if (pMesh && info && aState && aState.physPos) {
+            tempV.copy(aState.physPos);
+            tempV.y = aState.physPos.y + 2.2; // include physical height + head spacing offset
             tempV.project(camera);
             
             const targetX = (tempV.x * 0.5 + 0.5) * w;
@@ -1171,18 +2602,79 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
             const posY = Math.round(currentPos.y);
             const el = document.getElementById(`bubble-container-${pId}`);
             if (el) {
-              const isMobile = window.innerWidth <= 768;
-              const scaleVal = isMobile ? 1 : uiScale;
+              const scaleVal = getDynamicScaleVal();
               const scaleStr = scaleVal !== 1 ? ` scale(${scaleVal})` : "";
               el.style.transform = `translate3d(${posX}px, ${posY}px, 0)${scaleStr}`;
               el.style.transformOrigin = "bottom center";
             }
           }
         });
+
+        // Project physical Button Proximity Prompt screen location if visible
+        let showPrompt = false;
+        if (buttonMeshRef.current) {
+          const buttonPos = new THREE.Vector3();
+          buttonMeshRef.current.getWorldPosition(buttonPos);
+          const dist = playerPos.current.distanceTo(buttonPos);
+
+          // Render prompt if the player is within 3.5 meters of the button AND the button is not pressed
+          if (dist <= 3.5 && !buttonPressedStateRef.current) {
+            showPrompt = true;
+
+            const tempPromptV = new THREE.Vector3().copy(buttonPos);
+            tempPromptV.y += 0.25; // position slightly above the physical button mesh
+            tempPromptV.project(camera);
+
+            const targetX = (tempPromptV.x * 0.5 + 0.5) * w;
+            const targetY = (tempPromptV.y * -0.5 + 0.5) * h;
+
+            let currentPos = promptPosRef.current;
+            if (!currentPos) {
+              currentPos = { x: targetX, y: targetY };
+              promptPosRef.current = currentPos;
+            } else {
+              // Smoothly move current screen position towards target position (lerp factor 0.35)
+              currentPos.x += (targetX - currentPos.x) * 0.35;
+              currentPos.y += (targetY - currentPos.y) * 0.35;
+            }
+
+            const posX = currentPos.x.toFixed(2);
+            const posY = currentPos.y.toFixed(2);
+
+            const el = document.getElementById("proximity-prompt-container");
+            if (el) {
+              const scaleVal = getDynamicScaleVal();
+              const scaleStr = scaleVal !== 1 ? ` scale(${scaleVal})` : "";
+              el.style.transform = `translate3d(${posX}px, ${posY}px, 0) translate(-50%, -50%)${scaleStr}`;
+              el.style.transformOrigin = "center center";
+            }
+          } else {
+            promptPosRef.current = null;
+          }
+        }
+
+        // Sync visibility of proximity prompt UI
+        if (promptVisRef.current !== showPrompt) {
+          promptVisRef.current = showPrompt;
+          setPromptVis(showPrompt);
+        }
+
+        // Detect and dispatch instant (0 sec Hold) button press inputs
+        const isEPressed = !!(keysPressed.current["KeyE"] || mobilePromptHeldRef.current);
+        if (showPrompt && isEPressed && !buttonPressedStateRef.current) {
+          if (!promptTriggeredRef.current) {
+            promptTriggeredRef.current = true;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "button_press", payload: {} }));
+            }
+          }
+        } else if (!isEPressed) {
+          promptTriggeredRef.current = false;
+        }
       }
 
       if (isRendererReady && renderer) {
-        renderer.render(scene, camera);
+        composer.render();
       }
     };
 
@@ -1199,6 +2691,7 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
           camera.aspect = w / h;
           camera.updateProjectionMatrix();
           renderer.setSize(w, h);
+          composer.setSize(w, h);
         }
       }
     });
@@ -1209,8 +2702,52 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
 
     // --- 12. Cleanup on Dismount ---
     return () => {
+      if (scriptControllerRef.current) {
+        scriptControllerRef.current.cleanup();
+        scriptControllerRef.current = null;
+      }
       cancelAnimationFrame(animFrameId);
       resizeObserver.disconnect();
+      document.removeEventListener("physics_sync", handlePhysicsSync as any);
+      document.removeEventListener("button_state_changed", handleButtonStateChange as any);
+      document.removeEventListener("ws_event", handleWsEvent as any);
+
+      ballMeshes.forEach((mesh) => {
+        scene.remove(mesh);
+        const hitbox = mesh.getObjectByName("hitboxWireframe") as THREE.Mesh;
+        if (hitbox) {
+          hitbox.geometry.dispose();
+          if (Array.isArray(hitbox.material)) {
+            hitbox.material.forEach((m: any) => m.dispose());
+          } else {
+            hitbox.material.dispose();
+          }
+        }
+        if (mesh instanceof THREE.Mesh) {
+          if (mesh.geometry) mesh.geometry.dispose();
+          if (mesh.material) {
+            if (Array.isArray(mesh.material)) {
+              mesh.material.forEach((m: any) => m.dispose());
+            } else {
+              mesh.material.dispose();
+            }
+          }
+        } else {
+          mesh.traverse((child) => {
+            if (child instanceof THREE.Mesh) {
+              if (child.geometry) child.geometry.dispose();
+              if (child.material) {
+                if (Array.isArray(child.material)) {
+                  child.material.forEach((m: any) => m.dispose());
+                } else {
+                  child.material.dispose();
+                }
+              }
+            }
+          });
+        }
+      });
+      ballGeometry.dispose();
 
       scene.remove(localPlayerGroup);
       Object.values(otherPlayerMeshes).forEach((mesh) => scene.remove(mesh));
@@ -1234,15 +2771,21 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
       floorTexture.dispose();
       gridCanvas.remove();
 
+      outlinePass.dispose();
+      outputPass.dispose();
+      composer.dispose();
       renderer.dispose();
     };
-  }, [roomInfo.obstacles, graphicsQuality]);
+  }, [roomInfo.obstacles]);
 
   // Handle Event Key Triggers without stealing focus while editing settings JSON
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (document.activeElement?.tagName === "INPUT" || document.activeElement?.tagName === "TEXTAREA") {
         return;
+      }
+      if (e.code === "Space") {
+        e.preventDefault();
       }
       keysPressed.current[e.code] = true;
     };
@@ -1252,15 +2795,36 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
       }
       keysPressed.current[e.code] = false;
     };
+    const handleCustomJump = () => {
+      mobileJumpTriggered.current = true;
+    };
+    const handleCustomJumpHeld = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      const active = customEvent.detail && typeof customEvent.detail === "object" && "active" in customEvent.detail ? !!customEvent.detail.active : false;
+      keysPressed.current["Space"] = active;
+    };
+
+    const handleMouseMove = (e: MouseEvent) => {
+      mouseX.current = (e.clientX / window.innerWidth) * 2 - 1;
+      mouseY.current = -(e.clientY / window.innerHeight) * 2 + 1;
+    };
 
     window.addEventListener("keydown", handleKeyDown);
     window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("local-player-jump", handleCustomJump);
+    window.addEventListener("local-player-jump-held", handleCustomJumpHeld);
+    window.addEventListener("mousemove", handleMouseMove);
 
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("local-player-jump", handleCustomJump);
+      window.removeEventListener("local-player-jump-held", handleCustomJumpHeld);
+      window.removeEventListener("mousemove", handleMouseMove);
     };
   }, []);
+
+  const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || ("ontouchstart" in window);
 
   // Group active bubbles by player
   const bubblesByPlayer: Record<string, Array<ChatMessage & { createdAt: number }>> = {};
@@ -1288,8 +2852,7 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
         if (!pInfo) return null;
 
         const initialPos = bubblePositionsRef.current[pId];
-        const isMobileScreen = window.innerWidth <= 768;
-        const scaleVal = isMobileScreen ? 1 : uiScale;
+        const scaleVal = getDynamicScaleVal();
         const scaleStr = scaleVal !== 1 ? ` scale(${scaleVal})` : "";
         const initialTransform = initialPos 
           ? `translate3d(${Math.round(initialPos.x)}px, ${Math.round(initialPos.y)}px, 0)${scaleStr}` 
@@ -1339,19 +2902,91 @@ export default function GameCanvas({ playerId, roomInfo, ws, joystickRef, messag
               </AnimatePresence>
 
               {/* Player Floating Nickname Tag */}
-              <div className="flex items-center gap-1.5 justify-center select-none pointer-events-none transition-transform duration-250 hover:scale-105">
-                <AdaptiveUsername
-                  name={pInfo.name}
-                  effect={pInfo.nameEffect || "none"}
-                  color={pInfo.color}
-                  size="sm"
-                  isAdmin={pInfo.isAdmin}
-                />
-              </div>
+              {!pInfo.isDead && (
+                <div className="flex items-center gap-1.5 justify-center select-none pointer-events-none transition-transform duration-250 hover:scale-105">
+                  <AdaptiveUsername
+                    name={pInfo.name}
+                    effect={pInfo.nameEffect || "none"}
+                    color={pInfo.color}
+                    size="sm"
+                    isAdmin={pInfo.isAdmin}
+                  />
+                </div>
+              )}
             </div>
           </div>
         );
       })}
+
+      {/* Custom modular script HUD injections with platform-aligned dynamic scaling */}
+      <div 
+        className="absolute top-0 left-0 w-full h-full pointer-events-none z-45 overflow-hidden"
+        style={isMobileDevice ? undefined : {
+          transform: `scale(${uiScale})`,
+          transformOrigin: "top left",
+          width: `${100 / uiScale}%`,
+          height: `${100 / uiScale}%`,
+          transition: "transform 400ms cubic-bezier(0.16, 1, 0.3, 1)"
+        }}
+      >
+        {Object.values(customUIElements)}
+      </div>
+
+      {/* Virtual Dynamic / Floating Joystick for Mobile */}
+      {isMobileDevice && !editingProfile && !avatarShopOpen && joystickRef && (
+        <DynamicJoystick joystickRef={joystickRef as React.MutableRefObject<{ x: number; y: number } | null>} />
+      )}
+
+      {/* Casual Coins HUD (Left Center Y) - Mounted inside the actual Game Canvas for perfect design sandboxing */}
+      {!editingProfile && (
+        <div
+          className={`absolute left-5 z-40 pointer-events-none -translate-y-1/2 ${
+            !isMobileDevice && isChatVisible ? "top-[66%]" : "top-[50%]"
+          }`}
+          style={isMobileDevice ? undefined : {
+            transformOrigin: "left center",
+            transition: "transform 400ms cubic-bezier(0.16, 1, 0.3, 1), top 400ms cubic-bezier(0.16, 1, 0.3, 1)"
+          }}
+        >
+          <CasualCoinsHUD
+            coins={coins}
+            onAddCoins={onAddCoins}
+            language={language}
+            uiScale={uiScale}
+            isMobile={isMobileDevice}
+            onOpenShop={onOpenShop}
+            onOpenGift={onOpenGift}
+          />
+        </div>
+      )}
+
+      {/* Render Roblox Proximity Prompt Overlay */}
+      <div
+        id="proximity-prompt-container"
+        className="absolute top-0 left-0 pointer-events-auto z-50 flex items-center justify-center select-none"
+        style={{
+          transform: "translate3d(-9999px, -9999px, 0)",
+          pointerEvents: promptVis ? "auto" : "none"
+        }}
+        onPointerDown={() => {
+          mobilePromptHeldRef.current = true;
+        }}
+        onPointerUp={() => {
+          mobilePromptHeldRef.current = false;
+        }}
+        onPointerLeave={() => {
+          mobilePromptHeldRef.current = false;
+        }}
+      >
+        <ProximityPromptUI
+          visible={promptVis}
+          progress={0}
+          actionText={GameLocalization.t("proximityPress")}
+          holdText={GameLocalization.t("proximityButton")}
+          keyIndicator="E"
+          isMobile={/Mobi|Android/i.test(navigator.userAgent)}
+        />
+      </div>
     </div>
   );
 }
